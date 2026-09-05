@@ -1,0 +1,66 @@
+import logging
+
+from ultralytics import YOLO
+
+log = logging.getLogger("ibvap.detection")
+
+# COCO class ids relevant to border surveillance (person / vehicle / animal)
+PERSON_CLASS_IDS = {0}
+VEHICLE_CLASS_IDS = {1, 2, 3, 5, 7}  # bicycle, car, motorcycle, bus, truck
+ANIMAL_CLASS_IDS = {15, 16, 17, 18, 19, 20, 21, 22, 23}
+RELEVANT_CLASS_IDS = PERSON_CLASS_IDS | VEHICLE_CLASS_IDS | ANIMAL_CLASS_IDS
+
+
+class Detection:
+    __slots__ = (
+        "class_id",
+        "class_name",
+        "confidence",
+        "box",
+        "track_id",
+        "direction",
+        "person_id",
+    )
+
+    def __init__(self, class_id: int, class_name: str, confidence: float, box: tuple):
+        self.class_id = class_id
+        self.class_name = class_name
+        self.confidence = confidence
+        self.box = box  # (x1, y1, x2, y2) in pixel coords
+        self.track_id: int | None = None  # raw ByteTrack id; churns on re-appearance
+        self.direction: tuple[float, float] | None = None  # (dx, dy) over recent history
+        self.person_id: int | None = None  # persistent identity from the Re-ID gallery
+
+    def category(self) -> str:
+        if self.class_id in PERSON_CLASS_IDS:
+            return "person"
+        if self.class_id in VEHICLE_CLASS_IDS:
+            return "vehicle"
+        return "animal"
+
+
+class Detector:
+    """Wraps a YOLOv8 model, filtered down to person/vehicle/animal classes."""
+
+    def __init__(self, model_path: str = "models/yolov8n.onnx", confidence: float = 0.4):
+        log.info("Loading YOLO model: %s", model_path)
+        self._model = YOLO(model_path)
+        self.confidence = confidence
+
+    def detect(self, frame) -> list[Detection]:
+        results = self._model.predict(frame, conf=self.confidence, verbose=False)[0]
+        detections = []
+        for box in results.boxes:
+            class_id = int(box.cls[0])
+            if class_id not in RELEVANT_CLASS_IDS:
+                continue
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            detections.append(
+                Detection(
+                    class_id=class_id,
+                    class_name=results.names[class_id],
+                    confidence=float(box.conf[0]),
+                    box=(x1, y1, x2, y2),
+                )
+            )
+        return detections

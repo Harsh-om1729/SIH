@@ -1,0 +1,9 @@
+venv/
+.env
+__pycache__/
+*.pyc
+*.db
+snapshots/
+models/*.pt
+models/*.onnx
+models/*.onnx.data

@@ -1,0 +1,164 @@
+"""Offline unit tests for the Re-ID person gallery — no camera required.
+Run from ibvap/: python -m unittest tests.test_reid
+
+Uses a fast, deterministic fake embedder (mean crop color) instead of the
+real ResNet-18 model, so these tests exercise PersonGallery's bookkeeping
+logic (buffering, matching, TTL eviction) independent of embedding quality.
+"""
+
+import unittest
+
+import numpy as np
+
+from reid.reid import PersonGallery
+
+FRAME_SIZE = (480, 640, 3)
+
+
+def make_frame_with_patch(color: tuple, box: tuple) -> np.ndarray:
+    """A synthetic frame with a solid-color rectangle at `box`, standing in
+    for a person's appearance."""
+    frame = np.zeros(FRAME_SIZE, dtype=np.uint8)
+    x1, y1, x2, y2 = box
+    frame[y1:y2, x1:x2] = color
+    return frame
+
+
+def fake_embed(frame: np.ndarray, box: tuple):
+    """Deterministic stand-in for a real embedder: mean BGR color of the crop."""
+    x1, y1, x2, y2 = box
+    crop = frame[y1:y2, x1:x2]
+    if crop.size == 0:
+        return None
+    return crop.reshape(-1, 3).mean(axis=0).astype(np.float32)
+
+
+def resolve_until_decided(gallery: PersonGallery, track_id: int, frame, box):
+    """Keeps calling resolve() (as app.py does, once per frame) until the
+    gallery has buffered enough samples to return a decision."""
+    for _ in range(10):
+        person_id = gallery.resolve(track_id, frame, box)
+        if person_id is not None:
+            return person_id
+    raise AssertionError("gallery never resolved a person_id within 10 frames")
+
+
+class TestPersonGalleryReappearance(unittest.TestCase):
+    def test_same_person_reassigned_new_track_id_keeps_same_person_id(self):
+        """Simulates ByteTrack losing a person (ID 101) and, on return,
+        assigning a brand-new track_id (102) after a short absence — the
+        gallery should still resolve both to the same person_id.
+        """
+        clock = {"t": 0.0}
+        gallery = PersonGallery(
+            embed_fn=fake_embed,
+            similarity_threshold=0.8,
+            ttl_seconds=30.0,
+            min_samples=3,
+            now_fn=lambda: clock["t"],
+        )
+
+        box = (100, 100, 160, 260)  # tall person-shaped box
+        red_frame = make_frame_with_patch((0, 0, 220), box)
+
+        person_id_first = resolve_until_decided(gallery, 101, red_frame, box)
+
+        # Time passes (person briefly out of frame) but within the TTL window.
+        clock["t"] = 5.0
+
+        # ByteTrack assigns a new track_id on reappearance, same appearance.
+        person_id_second = resolve_until_decided(gallery, 102, red_frame, box)
+
+        self.assertEqual(person_id_first, person_id_second)
+
+    def test_different_person_gets_new_person_id(self):
+        clock = {"t": 0.0}
+        gallery = PersonGallery(
+            embed_fn=fake_embed,
+            similarity_threshold=0.8,
+            ttl_seconds=30.0,
+            min_samples=3,
+            now_fn=lambda: clock["t"],
+        )
+
+        box = (100, 100, 160, 260)
+        red_frame = make_frame_with_patch((0, 0, 220), box)
+        blue_frame = make_frame_with_patch((220, 0, 0), box)
+
+        person_id_a = resolve_until_decided(gallery, 201, red_frame, box)
+        clock["t"] = 2.0
+        person_id_b = resolve_until_decided(gallery, 202, blue_frame, box)
+
+        self.assertNotEqual(person_id_a, person_id_b)
+
+    def test_same_track_id_reuses_cached_person_id_without_rematching(self):
+        """While the same track_id keeps appearing (ByteTrack hasn't lost it),
+        repeated calls must return the same person_id every time."""
+        clock = {"t": 0.0}
+        gallery = PersonGallery(
+            embed_fn=fake_embed,
+            similarity_threshold=0.8,
+            ttl_seconds=30.0,
+            min_samples=3,
+            now_fn=lambda: clock["t"],
+        )
+
+        box = (100, 100, 160, 260)
+        red_frame = make_frame_with_patch((0, 0, 220), box)
+
+        first = resolve_until_decided(gallery, 301, red_frame, box)
+        clock["t"] = 1.0
+        second = gallery.resolve(301, red_frame, box)
+        clock["t"] = 2.0
+        third = gallery.resolve(301, red_frame, box)
+
+        self.assertEqual(first, second)
+        self.assertEqual(second, third)
+
+    def test_reappearance_after_ttl_expires_gets_new_person_id(self):
+        """If the gap is longer than ttl_seconds, the old entry is evicted and
+        must NOT be matched, even with identical appearance — otherwise two
+        unrelated people who happen to look similar days apart could merge."""
+        clock = {"t": 0.0}
+        gallery = PersonGallery(
+            embed_fn=fake_embed,
+            similarity_threshold=0.8,
+            ttl_seconds=10.0,
+            min_samples=3,
+            now_fn=lambda: clock["t"],
+        )
+
+        box = (100, 100, 160, 260)
+        red_frame = make_frame_with_patch((0, 0, 220), box)
+
+        person_id_first = resolve_until_decided(gallery, 401, red_frame, box)
+
+        clock["t"] = 100.0  # far beyond the 10s TTL
+        person_id_second = resolve_until_decided(gallery, 402, red_frame, box)
+
+        self.assertNotEqual(person_id_first, person_id_second)
+
+    def test_resolve_returns_none_while_buffering_samples(self):
+        """A brand-new track_id must not get an identity decision until
+        min_samples frames have been seen (avoids deciding off one noisy frame)."""
+        gallery = PersonGallery(embed_fn=fake_embed, similarity_threshold=0.8, ttl_seconds=30.0, min_samples=3)
+        box = (100, 100, 160, 260)
+        red_frame = make_frame_with_patch((0, 0, 220), box)
+
+        self.assertIsNone(gallery.resolve(501, red_frame, box))
+        self.assertIsNone(gallery.resolve(501, red_frame, box))
+        self.assertIsNotNone(gallery.resolve(501, red_frame, box))  # 3rd sample decides
+
+    def test_too_small_box_never_contributes_a_sample(self):
+        """A tiny/edge-clipped box (partial view of a person) shouldn't count
+        toward the sample buffer at all, since its embedding would be noise."""
+        gallery = PersonGallery(embed_fn=fake_embed, similarity_threshold=0.8, ttl_seconds=30.0, min_samples=2)
+        tiny_box = (100, 100, 110, 115)  # well under the min crop size
+        frame = make_frame_with_patch((0, 0, 220), tiny_box)
+
+        for _ in range(5):
+            self.assertIsNone(gallery.resolve(601, frame, tiny_box))
+
+
+if __name__ == "__main__":
+    unittest.main()
