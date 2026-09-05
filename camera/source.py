@@ -1,4 +1,5 @@
 import logging
+import os
 
 import cv2
 
@@ -6,12 +7,15 @@ log = logging.getLogger("ibvap.camera")
 
 
 class CameraSource:
-    """Wraps a single camera feed: a USB index (0, 1, ...) or an RTSP/ONVIF URL."""
+    """Wraps a single camera feed: a USB index (0, 1, ...), an RTSP/ONVIF URL,
+    or a local video file path (useful for testing against recorded footage,
+    e.g. vehicles, when no live feed is available)."""
 
     def __init__(self, source: int | str, width: int = 640, height: int = 480):
         self.source = source
         self.width = width
         self.height = height
+        self.is_file = isinstance(source, str) and os.path.isfile(source)
         self.cap: cv2.VideoCapture | None = None
 
     def open(self) -> None:
@@ -22,9 +26,20 @@ class CameraSource:
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
         log.info("Camera opened: %s (requested %dx%d)", self.source, self.width, self.height)
 
+    def native_fps(self) -> float:
+        fps = self.cap.get(cv2.CAP_PROP_FPS)
+        return fps if fps and fps > 0 else 30.0
+
     def read(self):
         ok, frame = self.cap.read()
-        return frame if ok else None
+        if not ok:
+            return None
+        if self.is_file:
+            # cap.set(FRAME_WIDTH/HEIGHT) is a no-op for files (only live
+            # cameras honor it), so resize explicitly to avoid processing
+            # native (often very high) file resolution on every stage.
+            frame = cv2.resize(frame, (self.width, self.height))
+        return frame
 
     def release(self) -> None:
         if self.cap is not None:

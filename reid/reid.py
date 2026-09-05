@@ -1,6 +1,6 @@
 import logging
 import time
-from typing import Callable
+from typing import Callable, Hashable
 
 import numpy as np
 
@@ -15,7 +15,7 @@ def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
 
 
 class PersonGallery:
-    """Resolves ByteTrack's churning `track_id` to a stable `person_id`.
+    """Resolves a track's churning identity to a stable `person_id`.
 
     ByteTrack only matches detections frame-to-frame by motion/position, so a
     person who leaves the frame (or is occluded) longer than its track buffer
@@ -24,7 +24,13 @@ class PersonGallery:
     a close-enough match to a recently-disappeared person reuses their id
     instead of minting a new one.
 
-    A new track_id's identity is decided from the *average* of its first
+    A single shared instance also gives cross-camera Re-ID (Phase 15): pass a
+    `track_key` that's unique per camera (e.g. `(camera_name, track_id)`, not
+    a raw track_id) when the same gallery serves multiple cameras — otherwise
+    two different cameras' ByteTrack instances could coincidentally produce
+    the same numeric track_id and wrongly merge unrelated people.
+
+    A new track_key's identity is decided from the *average* of its first
     `min_samples` embeddings (not a single frame) to cancel out noise from
     partial/edge-clipped boxes or momentary motion blur — `resolve()` returns
     None for those first few calls while samples are still being collected.
@@ -53,15 +59,15 @@ class PersonGallery:
         self._next_person_id = 1
         # person_id -> {"embedding": np.ndarray, "last_seen": float}
         self._gallery: dict[int, dict] = {}
-        # track_id -> {"person_id": int, "last_seen": float}, once resolved
-        self._track_to_person: dict[int, dict] = {}
-        # track_id -> list[np.ndarray], while still buffering samples
-        self._pending: dict[int, list[np.ndarray]] = {}
+        # track_key -> {"person_id": int, "last_seen": float}, once resolved
+        self._track_to_person: dict[Hashable, dict] = {}
+        # track_key -> list[np.ndarray], while still buffering samples
+        self._pending: dict[Hashable, list] = {}
 
-    def resolve(self, track_id: int, frame: np.ndarray, box: tuple) -> "int | None":
+    def resolve(self, track_key: Hashable, frame: np.ndarray, box: tuple) -> "int | None":
         now = self._now()
 
-        resolved = self._track_to_person.get(track_id)
+        resolved = self._track_to_person.get(track_key)
         if resolved is not None:
             resolved["last_seen"] = now
             person_id = resolved["person_id"]
@@ -79,17 +85,17 @@ class PersonGallery:
         if embedding is None:
             return None  # box too small/clipped to contribute a sample yet
 
-        samples = self._pending.setdefault(track_id, [])
+        samples = self._pending.setdefault(track_key, [])
         samples.append(embedding)
         if len(samples) < self.min_samples:
             return None  # still buffering — decide once we have enough samples
 
         mean_embedding = np.mean(samples, axis=0)
-        del self._pending[track_id]
+        del self._pending[track_key]
 
         person_id = self._match_or_create(mean_embedding, now)
         self._gallery[person_id] = {"embedding": mean_embedding, "last_seen": now}
-        self._track_to_person[track_id] = {"person_id": person_id, "last_seen": now}
+        self._track_to_person[track_key] = {"person_id": person_id, "last_seen": now}
         self._purge_stale(now)
         return person_id
 

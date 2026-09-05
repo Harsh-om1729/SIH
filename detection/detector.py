@@ -19,7 +19,12 @@ class Detection:
         "box",
         "track_id",
         "direction",
+        "speed",
         "person_id",
+        "zone_tier",
+        "zone_direction",
+        "watchlist_match",
+        "watchlist_similarity",
     )
 
     def __init__(self, class_id: int, class_name: str, confidence: float, box: tuple):
@@ -29,7 +34,12 @@ class Detection:
         self.box = box  # (x1, y1, x2, y2) in pixel coords
         self.track_id: int | None = None  # raw ByteTrack id; churns on re-appearance
         self.direction: tuple[float, float] | None = None  # (dx, dy) over recent history
+        self.speed: float = 0.0  # pixels/frame over recent history
         self.person_id: int | None = None  # persistent identity from the Re-ID gallery
+        self.zone_tier: str | None = None  # "red" | "yellow" | "green" | "none"
+        self.zone_direction: str | None = None  # "inward" | "outward" | None (yellow only)
+        self.watchlist_match: str | None = None  # matched name, if any
+        self.watchlist_similarity: float = 0.0
 
     def category(self) -> str:
         if self.class_id in PERSON_CLASS_IDS:

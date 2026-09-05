@@ -1,6 +1,9 @@
 import logging
 import queue
 import threading
+import time
+
+import cv2
 
 from camera.source import CameraSource
 
@@ -29,11 +32,28 @@ class CameraStream:
         self._thread.start()
 
     def _run(self) -> None:
+        frame_interval = 1.0 / self._camera.native_fps() if self._camera.is_file else 0.0
+        next_frame_at = time.perf_counter()
+
         while not self._stop_event.is_set():
             frame = self._camera.read()
             if frame is None:
+                if self._camera.is_file:
+                    log.info("[%s] video file ended, looping back to start", self.name)
+                    self._camera.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    continue
                 log.warning("[%s] no frame received, stopping producer", self.name)
                 break
+
+            if self._camera.is_file:
+                # Recorded files have no natural playback pace like a live
+                # camera does, so throttle to the file's own FPS.
+                now = time.perf_counter()
+                sleep_for = next_frame_at - now
+                if sleep_for > 0:
+                    time.sleep(sleep_for)
+                next_frame_at = max(now, next_frame_at) + frame_interval
+
             if self._queue.full():
                 try:
                     self._queue.get_nowait()

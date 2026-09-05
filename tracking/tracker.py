@@ -10,8 +10,8 @@ log = logging.getLogger("ibvap.tracking")
 class Tracker:
     """Runs detection + ByteTrack (via Ultralytics' built-in .track()) so each
     person/vehicle/animal gets a stable track ID across frames, and keeps a
-    short position history per track to derive a direction vector. Both feed
-    the zone engine and kinematics score in later phases.
+    short position history per track to derive a direction vector and a
+    per-frame speed. Both feed the zone engine and kinematics score.
     """
 
     def __init__(
@@ -60,14 +60,17 @@ class Tracker:
                 box=(x1, y1, x2, y2),
             )
             det.track_id = track_id
-            det.direction = self._compute_direction(history)
+            det.direction, det.speed = self._compute_direction_and_speed(history)
             detections.append(det)
 
         return detections
 
     @staticmethod
-    def _compute_direction(history: list[tuple[float, float]]):
+    def _compute_direction_and_speed(history: list[tuple[float, float]]):
         if len(history) < 2:
-            return None
+            return None, 0.0
         (x1, y1), (x2, y2) = history[0], history[-1]
-        return (x2 - x1, y2 - y1)
+        direction = (x2 - x1, y2 - y1)
+        elapsed_frames = len(history) - 1
+        speed = (direction[0] ** 2 + direction[1] ** 2) ** 0.5 / elapsed_frames
+        return direction, speed

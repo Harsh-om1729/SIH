@@ -51,6 +51,23 @@ REID_SIMILARITY_THRESHOLD = float(os.getenv("REID_SIMILARITY_THRESHOLD", "0.7"))
 # Re-ID: how long (seconds) a disappeared person stays eligible for matching
 REID_TTL_SECONDS = float(os.getenv("REID_TTL_SECONDS", "30"))
 
+# Green zones are re-tiered to "yellow" during this hour window (wraps midnight)
+CURFEW_START_HOUR = int(os.getenv("CURFEW_START_HOUR", "23"))
+CURFEW_END_HOUR = int(os.getenv("CURFEW_END_HOUR", "5"))
+
+# Seconds between repeat alerts for the same track at the same tier
+ALERT_COOLDOWN_SECONDS = float(os.getenv("ALERT_COOLDOWN_SECONDS", "8"))
+
+# Cosine similarity (0-1) above which a face is treated as a watchlist match
+WATCHLIST_SIMILARITY_THRESHOLD = float(os.getenv("WATCHLIST_SIMILARITY_THRESHOLD", "0.5"))
+
+# Outbound webhook URL for alert events (empty = disabled)
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
+
+# Syslog target for alert events (UDP; fire-and-forget, safe if unreachable)
+SYSLOG_HOST = os.getenv("SYSLOG_HOST", "localhost")
+SYSLOG_PORT = int(os.getenv("SYSLOG_PORT", "514"))
+
 
 def configure_logging() -> None:
     logging.basicConfig(

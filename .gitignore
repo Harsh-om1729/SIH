@@ -7,3 +7,7 @@ snapshots/
 models/*.pt
 models/*.onnx
 models/*.onnx.data
+config/zones_*.json
+database/evidence.key
+database/transfer.key
+transfer_bundle.enc

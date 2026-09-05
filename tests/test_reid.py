@@ -160,5 +160,42 @@ class TestPersonGalleryReappearance(unittest.TestCase):
             self.assertIsNone(gallery.resolve(601, frame, tiny_box))
 
 
+class TestCrossCameraReID(unittest.TestCase):
+    """Phase 15: one shared gallery serving multiple cameras must key on
+    (camera_name, track_id), not raw track_id, or two cameras that happen to
+    both assign track_id=1 to different people would get wrongly merged."""
+
+    def test_same_numeric_track_id_different_cameras_different_appearance_stays_separate(self):
+        gallery = PersonGallery(embed_fn=fake_embed, similarity_threshold=0.8, ttl_seconds=30.0, min_samples=3)
+        box = (100, 100, 160, 260)
+        red_frame = make_frame_with_patch((0, 0, 220), box)
+        blue_frame = make_frame_with_patch((220, 0, 0), box)
+
+        # Both cameras' ByteTrack independently assign track_id=1 to a
+        # DIFFERENT physical person (different appearance).
+        person_on_cam0 = resolve_until_decided(gallery, ("cam0", 1), red_frame, box)
+        person_on_cam1 = resolve_until_decided(gallery, ("cam1", 1), blue_frame, box)
+
+        self.assertNotEqual(person_on_cam0, person_on_cam1)
+
+    def test_same_person_recognized_across_two_cameras_gets_same_id(self):
+        """The actual point of Phase 15: a person walking from one camera's
+        view into another's keeps the same identity via appearance match."""
+        clock = {"t": 0.0}
+        gallery = PersonGallery(
+            embed_fn=fake_embed, similarity_threshold=0.8, ttl_seconds=30.0, min_samples=3,
+            now_fn=lambda: clock["t"],
+        )
+        box = (100, 100, 160, 260)
+        red_frame = make_frame_with_patch((0, 0, 220), box)
+
+        person_on_cam0 = resolve_until_decided(gallery, ("cam0", 7), red_frame, box)
+
+        clock["t"] = 3.0  # a couple seconds later, now seen by a different camera
+        person_on_cam1 = resolve_until_decided(gallery, ("cam1", 42), red_frame, box)
+
+        self.assertEqual(person_on_cam0, person_on_cam1)
+
+
 if __name__ == "__main__":
     unittest.main()
