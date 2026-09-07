@@ -61,8 +61,12 @@ class PersonGallery:
         self._gallery: dict[int, dict] = {}
         # track_key -> {"person_id": int, "last_seen": float}, once resolved
         self._track_to_person: dict[Hashable, dict] = {}
-        # track_key -> list[np.ndarray], while still buffering samples
-        self._pending: dict[Hashable, list] = {}
+        # track_key -> {"samples": list[np.ndarray], "last_seen": float}, while
+        # still buffering. Dropped once the track resolves - or, if the track
+        # disappears before ever reaching min_samples, evicted by the same TTL
+        # that retires disappeared people from the gallery, so short-lived
+        # tracks cannot leave their embeddings buffered forever.
+        self._pending: dict[Hashable, dict] = {}
 
     def resolve(self, track_key: Hashable, frame: np.ndarray, box: tuple) -> "int | None":
         now = self._now()
@@ -83,14 +87,19 @@ class PersonGallery:
 
         embedding = self._embed(frame, box)
         if embedding is None:
+            self._purge_stale(now)
             return None  # box too small/clipped to contribute a sample yet
 
-        samples = self._pending.setdefault(track_key, [])
-        samples.append(embedding)
-        if len(samples) < self.min_samples:
+        pending = self._pending.setdefault(track_key, {"samples": [], "last_seen": now})
+        pending["samples"].append(embedding)
+        pending["last_seen"] = now
+        if len(pending["samples"]) < self.min_samples:
+            # Purged here too: a stream of tracks that never reach min_samples
+            # would otherwise never reach a purge call at all.
+            self._purge_stale(now)
             return None  # still buffering — decide once we have enough samples
 
-        mean_embedding = np.mean(samples, axis=0)
+        mean_embedding = np.mean(pending["samples"], axis=0)
         del self._pending[track_key]
 
         person_id = self._match_or_create(mean_embedding, now)
@@ -140,3 +149,13 @@ class PersonGallery:
         ]
         for tid in stale_tracks:
             del self._track_to_person[tid]
+
+        stale_pending = [
+            key for key, e in self._pending.items() if now - e["last_seen"] > self.ttl_seconds
+        ]
+        for key in stale_pending:
+            del self._pending[key]
+        if stale_pending:
+            log.debug(
+                "Re-ID: dropped %d unresolved pending embedding buffer(s)", len(stale_pending)
+            )
