@@ -31,9 +31,18 @@ class CameraStream:
         )
         self._thread.start()
 
+    # A live RTSP stream commonly fails its first few reads while the H.264
+    # decoder is still resolving SPS/PPS and waiting for a clean keyframe —
+    # that is transient noise, not the stream ending. Only give up after
+    # this many *consecutive* failures (~2.5s at the retry sleep below),
+    # which still detects a genuinely dead/disconnected camera quickly.
+    MAX_CONSECUTIVE_FAILURES = 50
+    RETRY_SLEEP_SECONDS = 0.05
+
     def _run(self) -> None:
         frame_interval = 1.0 / self._camera.native_fps() if self._camera.is_file else 0.0
         next_frame_at = time.perf_counter()
+        consecutive_failures = 0
 
         while not self._stop_event.is_set():
             frame = self._camera.read()
@@ -42,8 +51,16 @@ class CameraStream:
                     log.info("[%s] video file ended, looping back to start", self.name)
                     self._camera.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
-                log.warning("[%s] no frame received, stopping producer", self.name)
-                break
+                consecutive_failures += 1
+                if consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
+                    log.warning(
+                        "[%s] no frame received after %d retries, stopping producer",
+                        self.name, consecutive_failures,
+                    )
+                    break
+                time.sleep(self.RETRY_SLEEP_SECONDS)
+                continue
+            consecutive_failures = 0
 
             if self._camera.is_file:
                 # Recorded files have no natural playback pace like a live
@@ -71,6 +88,21 @@ class CameraStream:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=2)
+            if self._thread.is_alive():
+                # The producer is still inside a blocking cap.read() (seen on
+                # a glitchy RTSP source — a single read can stall well past
+                # this timeout). Releasing the same cv2.VideoCapture from the
+                # main thread while the producer thread might still be
+                # reading it is a real race that can crash the whole process
+                # (a native mutex error, not a Python exception) — so leave
+                # it alone here; the daemon thread and its resources get
+                # reclaimed by the OS when the process exits.
+                log.warning(
+                    "[%s] producer thread still running after stop timeout — "
+                    "skipping camera release to avoid a use-after-release race",
+                    self.name,
+                )
+                return
         self._camera.release()
 
 

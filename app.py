@@ -1,4 +1,5 @@
 import logging
+import sys
 import time
 from collections import deque
 from datetime import datetime
@@ -14,12 +15,14 @@ from config.settings import (
     CAMERA_HEIGHT,
     CAMERA_SOURCES,
     CAMERA_WIDTH,
+    _parse_camera_sources,
     CURFEW_END_HOUR,
     CURFEW_START_HOUR,
     DETECTION_CONFIDENCE,
     DETECTION_MODEL_PATH,
     LOW_FPS_INTERVAL,
     MOTION_THRESHOLD,
+    REID_FACE_CHECK_INTERVAL,
     REID_SIMILARITY_THRESHOLD,
     REID_TTL_SECONDS,
     SYSLOG_HOST,
@@ -46,6 +49,36 @@ from zones.zone_engine import ZoneEngine
 
 configure_logging()
 log = logging.getLogger("ibvap")
+
+
+def cli_camera_sources(argv: list) -> "dict[str, int | str] | None":
+    """Lets camera sources be given directly on the command line instead of
+    only via CAMERA_SOURCES in .env — e.g.:
+
+        python app.py rtsp://192.168.1.46:8080/h264_ulaw.sdp
+        python app.py 0 rtsp://192.168.1.46:8080/h264_ulaw.sdp   # webcam + phone, both live
+        python app.py cam_phone=rtsp://192.168.1.46:8080/h264_ulaw.sdp
+
+    Each positional argument is one camera: a bare RTSP/URL or webcam index
+    is auto-named cam0, cam1, ...; name=source gives it a custom name. Reuses
+    config.settings' own parser so the two entry points parse identically.
+    Returns None (meaning "use CAMERA_SOURCES from .env") if no camera
+    arguments were given.
+    """
+    positional = [a for a in argv if not a.startswith("--")]
+    if not positional:
+        return None
+
+    parts = []
+    for i, entry in enumerate(positional):
+        name, _, _value = entry.partition("=")
+        # A real name=value split has a plain identifier before the "=". If
+        # that part looks like a URL scheme or a webcam index instead, the
+        # "=" almost certainly belongs to the URL itself (e.g. a query
+        # string, "...?user=admin"), so treat the whole entry as bare.
+        is_valid_name = "=" in entry and name and "://" not in name and not name.isdigit()
+        parts.append(entry if is_valid_name else f"cam{i}={entry}")
+    return _parse_camera_sources(",".join(parts))
 
 
 def draw_debug_overlay(frame, preprocessor: Preprocessor, active: bool, motion_score: float):
@@ -154,6 +187,10 @@ def main() -> None:
     frame_buffers = {name: deque(maxlen=3) for name in CAMERA_SOURCES}
     last_frame_time = {name: None for name in CAMERA_SOURCES}
     fps_ema = {name: 0.0 for name in CAMERA_SOURCES}
+    # Per-camera caches so a throttled (skipped) frame still shows the last
+    # known identity/watchlist result instead of blanking it out.
+    person_id_cache = {name: {} for name in CAMERA_SOURCES}
+    watchlist_cache = {name: {} for name in CAMERA_SOURCES}
 
     try:
         while True:
@@ -184,21 +221,40 @@ def main() -> None:
                 detections = false_alarm_filters[name].filter(detections)
                 for det in detections:
                     if det.track_id is not None and det.category() == "person":
-                        det.person_id = person_gallery.resolve(
-                            (name, det.track_id), processed, det.box
+                        track_id = det.track_id
+                        # A brand-new track is checked every frame (Re-ID
+                        # needs consecutive samples to decide an identity at
+                        # all — resolve() returns None while still buffering,
+                        # so check *value*, not key presence, or a track
+                        # stuck buffering would get throttled before it ever
+                        # resolves); once resolved, re-checking every Nth
+                        # frame is enough — appearance doesn't change frame-to-frame.
+                        already_resolved = person_id_cache[name].get(track_id) is not None
+                        due_for_check = frame_counters[name] % REID_FACE_CHECK_INTERVAL == 0
+                        if not already_resolved or due_for_check:
+                            det.person_id = person_gallery.resolve(
+                                (name, track_id), processed, det.box
+                            )
+                            person_id_cache[name][track_id] = det.person_id
+                        else:
+                            det.person_id = person_id_cache[name][track_id]
+
+                        if not already_resolved or due_for_check:
+                            _face_box, embedding = face_recognizer.embed(processed, det.box)
+                            if embedding is not None:
+                                match_name, similarity = watchlist_matcher.match(embedding)
+                                watchlist_cache[name][track_id] = (match_name, similarity)
+                        cached_match, cached_similarity = watchlist_cache[name].get(
+                            track_id, (None, 0.0)
                         )
+                        det.watchlist_match = cached_match
+                        det.watchlist_similarity = cached_similarity
+
                     x1, y1, x2, y2 = det.box
                     ground_point = ((x1 + x2) // 2, y2)
                     zone_result = zone_engines[name].classify(ground_point, det.direction)
                     det.zone_tier = zone_result["tier"]
                     det.zone_direction = zone_result["direction"]
-
-                    if det.category() == "person":
-                        _face_box, embedding = face_recognizer.embed(processed, det.box)
-                        if embedding is not None:
-                            match_name, similarity = watchlist_matcher.match(embedding)
-                            det.watchlist_match = match_name
-                            det.watchlist_similarity = similarity
 
                 draw_detections(processed, detections)
 
@@ -230,4 +286,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    cli_sources = cli_camera_sources(sys.argv[1:])
+    if cli_sources is not None:
+        CAMERA_SOURCES = cli_sources
+        log.info("Using camera source(s) from command line: %s", CAMERA_SOURCES)
     main()

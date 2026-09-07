@@ -1,0 +1,16 @@
+# Ultralytics YOLO 🚀, AGPL-3.0 license
+# ByteTrack settings tuned for noisy/lossy sources (e.g. a phone's RTSP
+# stream over Wi-Fi), where occasional H.264 decode corruption can visibly
+# shift or resize a detection box even though the real person hasn't moved
+# much — the default match_thresh is strict enough that this alone breaks
+# frame-to-frame association and mints a new track. Found via live testing
+# (excess track churn on an RTSP feed vs. a stable USB webcam) — see
+# ibvap/README.md's tracking notes.
+
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+track_buffer: 60 # was 30 — more tolerance for a brief run of degraded/missed detections
+match_thresh: 0.65 # was 0.8 — tolerates more frame-to-frame box drift before giving up
+fuse_score: True

@@ -34,10 +34,10 @@ MOTION_THRESHOLD = float(os.getenv("MOTION_THRESHOLD", "2.0"))
 LOW_FPS_INTERVAL = int(os.getenv("LOW_FPS_INTERVAL", "10"))
 
 # Minimum YOLO confidence to keep a detection
-DETECTION_CONFIDENCE = float(os.getenv("DETECTION_CONFIDENCE", "0.4"))
+DETECTION_CONFIDENCE = float(os.getenv("DETECTION_CONFIDENCE", "0.5"))
 
 # Path to the model file the detector loads (.pt, .onnx, or an int8 .onnx)
-DETECTION_MODEL_PATH = os.getenv("DETECTION_MODEL_PATH", "models/yolov8n.onnx")
+DETECTION_MODEL_PATH = os.getenv("DETECTION_MODEL_PATH", "models/yolov8s.onnx")
 
 # Requested camera capture resolution. Cameras often default to a much higher
 # resolution (e.g. 1080p) which inflates every downstream stage for no benefit.
@@ -67,6 +67,15 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 # Syslog target for alert events (UDP; fire-and-forget, safe if unreachable)
 SYSLOG_HOST = os.getenv("SYSLOG_HOST", "localhost")
 SYSLOG_PORT = int(os.getenv("SYSLOG_PORT", "514"))
+
+# Re-run Re-ID embedding + face/watchlist recognition for an already-resolved
+# track only every Nth frame, not every frame. Measured cost: ~7.6ms (Re-ID)
+# + ~6.4ms (face) per person per frame — real, avoidable weight once an
+# identity is already known, since appearance barely changes frame-to-frame.
+# A brand-new (not-yet-resolved) track is never throttled by this — it still
+# gets checked every frame, since PersonGallery needs consecutive samples to
+# decide an identity in the first place.
+REID_FACE_CHECK_INTERVAL = int(os.getenv("REID_FACE_CHECK_INTERVAL", "5"))
 
 
 def configure_logging() -> None:

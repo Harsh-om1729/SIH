@@ -8,17 +8,30 @@ Reuses the exact same detection/tracking/zone/scoring/alerting pipeline as
 app.py, rendered into a browser dashboard instead of an OpenCV window. Zone
 drawing stays in app.py's interactive OpenCV drawer (Phase 8) — this
 dashboard loads the same config/zones_<camera>.json files read-only.
+
+Video and the incidents panel share ONE st.fragment with a single
+run_every. Two fragments with different run_every values were tried first
+and measured (via a temporary diagnostic) to both collapse onto a shared
+~1000ms tick regardless of their configured intervals — a real Streamlit
+quirk, not a bug in our own code, which was timed at 1-2ms per tick and was
+never the bottleneck. A follow-up attempt to keep the incidents panel on
+its own slower cadence *within* the single fragment (manually clearing a
+placeholder created outside it and redrawing a variable number of widgets
+into it) crashed the browser with a "Bad 'setIn' index" error — fragments
+already replace their own contents automatically on each rerun, and fighting
+that with a manual placeholder/.empty() trick desyncs the frontend's
+element tracking. Both video and the incidents panel now just render
+directly, every tick, with no placeholder tricks — the same way the video
+placeholder above always worked (a plain per-tick update, nothing manual).
 """
 
 import os
 import sys
-import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import cv2
-import pandas as pd
 import streamlit as st
 
 from activity_gate.gate import ActivityGate
@@ -37,7 +50,7 @@ from config.settings import (
     LOW_FPS_INTERVAL,
     MOTION_THRESHOLD,
 )
-from database.incident_store import IncidentStore
+from database.incident_store import RESOLUTION_REASONS, IncidentStore
 from detection.draw import draw_detections
 from filtering.false_alarm import FalseAlarmFilter
 from intelligence.threat_rules import ThreatRulesDB
@@ -47,12 +60,16 @@ from tracking.tracker import Tracker
 from zones.zone_engine import ZoneEngine
 
 TIER_COLORS_BGR = {"green": (0, 200, 0), "yellow": (0, 220, 220), "red": (0, 0, 255)}
+STATUS_BADGES = {"open": "🔴 OPEN", "acknowledged": "🟡 ACKNOWLEDGED", "resolved": "🟢 RESOLVED"}
 
 st.set_page_config(page_title="IBVAP Dashboard", layout="wide")
-st.title("IBVAP — Live Monitoring Dashboard")
+st.title("IBVAP — Operator Dashboard")
 st.caption(
-    "Draw zones in the main `python app.py` OpenCV window first (Phase 8) — "
-    "this dashboard loads them read-only."
+    "For live, moment-to-moment monitoring use the `python app.py` OpenCV window — "
+    "it draws natively and is noticeably smoother. This dashboard is the incident-review "
+    "and operator workflow surface (Acknowledge → Resolve); its video feed is best-effort, "
+    "not a real-time stream. Draw zones in the OpenCV window (Phase 8) — this dashboard "
+    "loads them read-only."
 )
 
 
@@ -92,68 +109,122 @@ def build_pipeline():
 
 pipeline = build_pipeline()
 
+with st.sidebar:
+    st.header("Operator")
+    st.text_input(
+        "Operator name",
+        value=st.session_state.get("operator_name", "Duty Operator"),
+        key="operator_name",
+    )
+    st.markdown("---")
+    st.markdown("### System Info")
+    st.markdown(f"**Cameras:** {len(CAMERA_SOURCES)}")
+    st.markdown(f"**Detection Model:** `{DETECTION_MODEL_PATH}`")
+    st.markdown(f"**Confidence Threshold:** `{DETECTION_CONFIDENCE}`")
+
 col_video, col_incidents = st.columns([2, 1])
-video_placeholders = {name: col_video.empty() for name in CAMERA_SOURCES}
-col_incidents.subheader("Recent Incidents")
-incidents_placeholder = col_incidents.empty()
 
-while True:
-    frames = pipeline["manager"].read_all()
-    for name, frame in frames.items():
-        if frame is None:
-            continue
+with col_video:
+    st.subheader("Live Feed")
 
-        active, _motion_score = pipeline["gates"][name].is_active(frame)
-        pipeline["frame_counters"][name] += 1
-        should_process = active or (pipeline["frame_counters"][name] % LOW_FPS_INTERVAL == 0)
-        if not should_process:
-            continue
+    @st.fragment(run_every=0.2)
+    def render_video_feed() -> None:
+        frames = pipeline["manager"].read_all()
+        for name, frame in frames.items():
+            if frame is None:
+                continue
 
-        processed = pipeline["preprocessors"][name].process(frame)
-        detections = pipeline["trackers"][name].track(processed)
-        detections = pipeline["false_alarm_filters"][name].filter(detections)
+            active, _motion_score = pipeline["gates"][name].is_active(frame)
+            pipeline["frame_counters"][name] += 1
+            should_process = active or (pipeline["frame_counters"][name] % LOW_FPS_INTERVAL == 0)
+            if not should_process:
+                continue
 
-        for det in detections:
-            x1, y1, x2, y2 = det.box
-            ground_point = ((x1 + x2) // 2, y2)
-            zone_result = pipeline["zone_engines"][name].classify(ground_point, det.direction)
-            det.zone_tier = zone_result["tier"]
-            det.zone_direction = zone_result["direction"]
+            processed = pipeline["preprocessors"][name].process(frame)
+            detections = pipeline["trackers"][name].track(processed)
+            detections = pipeline["false_alarm_filters"][name].filter(detections)
 
-        draw_detections(processed, detections)
+            for det in detections:
+                x1, y1, x2, y2 = det.box
+                ground_point = ((x1 + x2) // 2, y2)
+                zone_result = pipeline["zone_engines"][name].classify(ground_point, det.direction)
+                det.zone_tier = zone_result["tier"]
+                det.zone_direction = zone_result["direction"]
 
-        scores = []
-        for det in detections:
-            score = pipeline["threat_scorer"].score(
-                zone_tier=det.zone_tier,
-                hour=datetime.now().hour,
-                speed_px_per_frame=det.speed,
-                category=det.category(),
+            draw_detections(processed, detections)
+
+            scores = []
+            for det in detections:
+                score = pipeline["threat_scorer"].score(
+                    zone_tier=det.zone_tier,
+                    hour=datetime.now().hour,
+                    speed_px_per_frame=det.speed,
+                    category=det.category(),
+                )
+                scores.append(score)
+                x1, y1, x2, y2 = det.box
+                label = f"T={score.total:.0f} ({score.tier.upper()})"
+                cv2.putText(
+                    processed, label, (x1, y2 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                    TIER_COLORS_BGR[score.tier], 2,
+                )
+
+            buffer = pipeline["frame_buffers"][name]
+            buffer.append(processed.copy())
+            if len(buffer) > 3:
+                buffer.pop(0)
+            for det, score in zip(detections, scores):
+                pipeline["alert_manager"].handle(det, score, buffer)
+
+            rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
+            st.image(
+                rgb, channels="RGB", caption=name, output_format="JPEG"
             )
-            scores.append(score)
-            x1, y1, x2, y2 = det.box
-            label = f"T={score.total:.0f} ({score.tier.upper()})"
-            cv2.putText(
-                processed, label, (x1, y2 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
-                TIER_COLORS_BGR[score.tier], 2,
-            )
 
-        buffer = pipeline["frame_buffers"][name]
-        buffer.append(processed.copy())
-        if len(buffer) > 3:
-            buffer.pop(0)
-        for det, score in zip(detections, scores):
-            pipeline["alert_manager"].handle(det, score, buffer)
+    render_video_feed()
 
-        rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-        video_placeholders[name].image(rgb, channels="RGB", caption=name)
+with col_incidents:
+    st.subheader("Recent Incidents")
 
-    incidents = pipeline["incident_store"].list_incidents(limit=15)
-    if incidents:
-        df = pd.DataFrame(incidents)[["id", "timestamp", "category", "zone_tier", "tier", "score"]]
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="s").dt.strftime("%H:%M:%S")
-        incidents_placeholder.dataframe(df, hide_index=True, use_container_width=True)
-    else:
-        incidents_placeholder.info("No incidents recorded yet.")
+    @st.fragment(run_every=2.0)
+    def render_incidents_panel() -> None:
+        operator_name = st.session_state.get("operator_name", "Duty Operator")
+        incidents = pipeline["incident_store"].list_incidents(limit=15)
+        if not incidents:
+            st.info("No incidents recorded yet.")
+            return
 
-    time.sleep(0.03)
+        for inc in incidents:
+            status = inc.get("status") or "open"
+            badge = STATUS_BADGES.get(status, status)
+            ts = datetime.fromtimestamp(inc["timestamp"]).strftime("%H:%M:%S")
+
+            with st.container(border=True):
+                st.markdown(
+                    f"**#{inc['id']}** · {ts} · {inc['category']} · zone={inc['zone_tier']} · "
+                    f"score={inc['score']:.0f} ({inc['tier']}) · {badge}"
+                )
+
+                if status == "resolved":
+                    st.caption(
+                        f"Resolved by {inc['resolved_by']} — {inc['resolution_reason']}"
+                    )
+                    continue
+
+                ack_col, reason_col, resolve_col = st.columns([1, 2, 1])
+                if status == "open":
+                    if ack_col.button("Acknowledge", key=f"ack_{inc['id']}"):
+                        pipeline["incident_store"].acknowledge(inc["id"], operator_name)
+                        st.rerun(scope="fragment")
+                else:
+                    ack_col.caption(f"Ack: {inc['acknowledged_by']}")
+
+                reason = reason_col.selectbox(
+                    "Resolution", RESOLUTION_REASONS, key=f"reason_{inc['id']}",
+                    label_visibility="collapsed",
+                )
+                if resolve_col.button("Resolve", key=f"resolve_{inc['id']}"):
+                    pipeline["incident_store"].resolve(inc["id"], operator_name, reason)
+                    st.rerun(scope="fragment")
+
+    render_incidents_panel()

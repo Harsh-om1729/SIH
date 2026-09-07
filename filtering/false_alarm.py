@@ -3,8 +3,15 @@ from detection.detector import Detection
 # Expected (min, max) height/width ratio per category. Rejects boxes that are
 # implausibly shaped for their class — a common tell for a misdetection on
 # foliage, shadows, or reflections rather than a real person/vehicle/animal.
+#
+# "person" originally required height > width (min 1.0), tuned for the
+# border-sentry scenario of an upright, walking pedestrian. That silently
+# rejected every correct detection of someone lying/reclining (a wide, short
+# box) — found via live testing, not theorized. Widened to admit both
+# postures; a truly implausible sliver (near-zero ratio, e.g. a shadow or
+# stray branch) is still rejected by the 0.2 floor.
 ASPECT_RATIO_RANGES = {
-    "person": (1.0, 4.0),
+    "person": (0.2, 4.0),
     "vehicle": (0.3, 2.5),
     "animal": (0.3, 3.0),
 }

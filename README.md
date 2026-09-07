@@ -81,3 +81,192 @@ from the *average* of its first few embeddings (not a single frame) to cancel
 out noise from partial/edge-clipped boxes, and skipping embedding entirely for
 boxes below a minimum size. Both configurable: `REID_SIMILARITY_THRESHOLD`,
 `REID_TTL_SECONDS` in `.env`.
+
+## Detection model & confidence notes
+
+Live testing surfaced a real false-positive: a person's own bent leg/knee
+(close to camera, with a strapped-on device) got detected as a *second*
+"person" at confidence 0.43, right beside the correctly-detected real person
+at 0.90. Two things were tried, in order:
+
+1. **Raised `DETECTION_CONFIDENCE`** from 0.4 to 0.5 (comfortable margin above
+   the observed false positive) — insufficient alone; the false positive
+   persisted at a similar confidence on retest.
+2. **Switched the default detection model from YOLOv8n to YOLOv8s** — the
+   next size up, still comfortably real-time (measured **95.3 FPS** via
+   `scripts/benchmark_models.py` on this machine's CPU, vs. YOLOv8n's 148.5).
+   More model capacity generally means fewer confusions like a bent limb read
+   as a second person. `FalseAlarmFilter`'s aspect-ratio check couldn't have
+   caught this either way — the false box's ratio (~1.6:1) and its overlap
+   with the real detection (IoU ≈ 0.05) both fell within normal, accepted
+   ranges, so this really was a model-accuracy issue, not a filtering gap.
+   **Live-verified after the swap: the false leg detection no longer appears.**
+
+`DETECTION_MODEL_PATH` defaults to `models/yolov8s.onnx`; swap back to
+`models/yolov8n.onnx` for maximum speed on weaker target hardware if needed.
+Raising confidence further is still a real lever (`DETECTION_CONFIDENCE` in
+`.env`) but trades off missing genuinely low-confidence real detections
+(distance, angle, partial occlusion) — a real precision/recall tradeoff,
+tuned from observed cases rather than proven optimal.
+
+Separately: an aspect-ratio range of (1.0, 4.0) for "person" (requiring
+height > width) was found, via live testing, to silently reject every correct
+detection of someone lying/reclining — a wide, short box. Widened to
+(0.2, 4.0) to admit both upright and reclined postures. **Live-verified: a
+reclining pose is now correctly boxed.**
+
+## Phase 12A face recognition notes
+
+Live testing on a phone RTSP feed found InsightFace missing faces it should
+have caught. Root cause: `FaceRecognizer.embed()` originally handed the
+detector the *entire* person bounding box — tall and narrow — which InsightFace
+resizes down to fit its detector window, shrinking the face far more than
+necessary. Fixed by cropping to just the head/shoulder region (top ~50% of
+the person box height) before detection, and raised `det_size` to 416x416
+with a lower `det_thresh` (0.4) for more margin. **Live-verified after the
+fix**: a watchlist match reliably escalates to Red on both the local webcam
+and a phone RTSP feed.
+
+## RTSP camera notes
+
+Confirmed working against a phone running an IP-camera app (e.g. "IP Webcam"
+on Android), streamed over local Wi-Fi. Two real issues found and fixed:
+
+- The stream manager's producer thread treated *any* single failed frame read
+  as "the stream has ended" and permanently stopped — but a live RTSP stream
+  routinely fails its first several reads while the H.264 decoder is still
+  resolving SPS/PPS and waiting for a clean keyframe. Now retries up to 50
+  consecutive failures (~2.5s) before giving up, which still detects a
+  genuinely dead camera quickly.
+- Camera sources can now be given directly on the command line instead of
+  only via `CAMERA_SOURCES` in `.env` — e.g.
+  `python app.py rtsp://192.168.1.46:8080/h264_ulaw.sdp`, or multiple sources
+  at once: `python app.py 0 rtsp://192.168.1.46:8080/h264_ulaw.sdp`.
+
+**Re-ID/track-ID churn on the phone feed** (person's identity changing far
+more often than on the stable USB webcam) was investigated with actual
+measurements rather than guessed at:
+- Directly measured raw frame-arrival timing from the RTSP stream (15s
+  capture, 914 frames, 0 failed reads): median gap 8.7ms, max gap only
+  162.7ms — ruling out network jitter/stalls as the cause.
+- H.264 decode errors ("error while decoding MB...", "cabac decode...")
+  were observed continuously during normal operation, not just at stream
+  startup — meaning some "successfully read" frames are visually corrupted
+  or partially stale rather than cleanly dropped.
+- ByteTrack's bundled default (`match_thresh: 0.8`, `track_buffer: 30`) is
+  tuned for a clean source; a corrupted frame can visibly shift/resize a box
+  even when the person hasn't moved, which breaks that strict IoU matching
+  and mints an unnecessary new track ID. Added
+  `tracking/bytetrack_tolerant.yaml` (`match_thresh: 0.65`,
+  `track_buffer: 60`) as the new default tracker config, giving more
+  tolerance for this kind of noisy-source drift. **Live-verified**: the
+  primary tracked identity stayed on one person ID continuously for ~44
+  seconds on the phone feed, a large improvement over the pre-fix baseline
+  (new ID roughly every few seconds).
+
+**Shutdown crash on a glitchy RTSP source**: quitting the app after a run
+with heavy decode errors sometimes crashed the whole process with a native
+`libc++abi`/`recursive_mutex` error, not a Python exception. Root cause:
+`CameraStream.stop()` called `self._camera.release()` right after
+`thread.join(timeout=2)`, without checking whether the join actually
+succeeded — if the producer thread was still stuck inside a slow/blocked
+`cap.read()` (which a corrupted RTSP source can trigger), the main thread
+would release the same `cv2.VideoCapture` object while the producer thread
+might still be reading from it concurrently, a real data race that can crash
+the process outright rather than raise a catchable exception. Fixed by
+checking `thread.is_alive()` after the join and skipping the release (with a
+logged warning) if the producer hasn't actually stopped — the leaked handle
+is reclaimed by the OS at process exit either way, which is far preferable
+to a hard crash.
+
+## Incident operator workflow (Acknowledge / Resolve)
+
+Every incident now carries `status` (`open` → `acknowledged` → `resolved`),
+who acted on it and when (`acknowledged_by`/`_at`, `resolved_by`/`_at`), and
+a controlled resolution reason (`cattle`, `vegetation`,
+`authorized_personnel`, `genuine_intrusion`, `patrol_dispatched`) — see
+`database/incident_store.py`'s `acknowledge()`/`resolve()`. This is what
+turns a raw detection stream into something a sentry can actually work
+through on shift, and the resolution reason doubles as a self-generating
+false-alarm dataset once a real operator is using it.
+
+Added via `ALTER TABLE ADD COLUMN`, never a table rebuild — **verified
+against the real `incidents.db` from this session's testing (524 rows)**:
+row count and existing data were unchanged after migration, and every
+pre-existing row correctly defaulted to `status='open'`.
+
+The Streamlit dashboard's Acknowledge/Resolve buttons required fixing a real
+architecture bug first: the dashboard ran a bare `while True: ...` loop,
+which would have silently made every button non-functional — Streamlit only
+processes a widget's clicked state on the *next* script run, and a literal
+infinite loop never lets that next run happen. First fix (`time.sleep()` +
+a full-page `st.rerun()` each pass) made the buttons work but visibly
+flickered the whole page — a full rerun tears down and rebuilds *everything*
+(video, text input, every incident card) each cycle. Replaced with two
+independent `st.fragment`s: `render_video()` and `render_incidents()`
+(`run_every=1`), each refreshing on its own schedule without disturbing the
+other, and a button click inside a fragment only reruns that fragment
+(`st.rerun(scope="fragment")`) — no full-page rerun needed at all.
+
+Fixing the flicker surfaced a separate lag: `st.image()` defaults to PNG,
+meaningfully slower to encode than JPEG for video content, and every
+fragment tick also pays a WebSocket round-trip the OpenCV window (`app.py`)
+never does — that window just blits natively, no encode/network cost at
+all. Set `output_format="JPEG"` on the video call and relaxed
+`render_video`'s `run_every` from 0.05 to 0.1 to match a realistic per-tick
+cost rather than repeatedly overshooting an unachievable target.
+
+Even after both fixes, video through Streamlit stayed visibly less smooth
+than the OpenCV window — and that's an architectural ceiling, not a bug to
+keep chasing. Every frame through `st.image()` in a fragment pays a real
+Python→encode→WebSocket→browser round-trip; `app.py`'s OpenCV window blits
+natively with none of that. **Scoping decision, made explicitly rather than
+discovered by a judge**: `app.py` stays the live moment-to-moment monitoring
+interface; the Streamlit dashboard is the incident-review and operator
+workflow (Acknowledge/Resolve) surface, where occasional video choppiness is
+an acceptable tradeoff. This matches how the roadmap itself scoped Phase 13
+— a prototype stage, with a hardened React + FastAPI dashboard (real video
+streaming, not `st.image()`) named as the eventual production version.
+
+**Correction, found by actually measuring it**: the video lag was *not*
+architectural after all. Added a temporary diagnostic printing the real
+wall-clock gap between fragment ticks — it showed a steady **~1000ms** gap
+despite `render_video` being configured for `run_every=0.1` (100ms), while
+our own code inside each tick measured only **1-2ms**. Our code was never
+the bottleneck. Root cause: two `st.fragment`s with *different* `run_every`
+values on the same page (video at 0.1, incidents at 1) collapsed onto a
+shared ~1-second cadence rather than running independently — a real
+Streamlit quirk, not documented anywhere obvious. Fixed by merging both into a single fragment. First attempt tried to keep
+the incidents panel on its own slower cadence *within* that one fragment by
+manually clearing a placeholder (created outside the fragment) and
+redrawing a variable-length subtree of widgets into it each time — this
+crashed the browser outright with a "Bad 'setIn' index" error. Fragments
+already replace their own contents automatically between reruns; fighting
+that with a manual `.empty()` + rebuild trick desyncs the frontend's element
+tracking. Fixed properly by removing that entirely: both the video and the
+incidents panel now render directly, every tick (`run_every=0.2`), with no
+placeholder tricks — exactly the same plain per-tick-update pattern the
+video placeholder always used safely. This is the actual lesson from this
+whole investigation: measure before concluding "architectural limitation,"
+and don't fight a framework's own state-management model with manual
+workarounds when the plain, direct approach already works.
+
+## FPS: throttled Re-ID / face recognition (app.py)
+
+Directly measured (not assumed) per-call cost on this machine: YOLOv8s +
+ByteTrack ~12ms/frame, ResNet-18 Re-ID embed ~7.6ms, InsightFace embed
+~6.4ms — and both Re-ID and face/watchlist recognition were running on
+*every single frame, for every detected person*, even once that person's
+identity was already resolved. That's ~14ms/person/frame of avoidable
+repeated work, since appearance barely changes frame-to-frame once known.
+
+Fixed by only re-checking Re-ID and face/watchlist recognition every
+`REID_FACE_CHECK_INTERVAL` frames (default 5) once a track's identity is
+already resolved — a brand-new track is still checked every frame
+unthrottled, since `PersonGallery.resolve()` needs consecutive samples to
+decide an identity in the first place (skipping those frames would prevent
+it from ever resolving). Verified the throttle logic itself with a
+standalone call-count simulation before touching the live app: full-rate
+during the buffering phase, settling into exactly 1-in-5 calls once
+resolved — an ~80% reduction in that per-person cost. **Live-verified**:
+noticeably higher FPS and smoother video on the webcam feed after the change.

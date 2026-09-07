@@ -9,6 +9,21 @@ from cryptography.fernet import Fernet
 
 log = logging.getLogger("ibvap.incidents")
 
+STATUS_OPEN = "open"
+STATUS_ACKNOWLEDGED = "acknowledged"
+STATUS_RESOLVED = "resolved"
+
+# Controlled vocabulary for how an operator closed out an incident — doubles
+# as a self-generating false-alarm dataset (most incidents in practice are
+# cattle/vegetation, not genuine intrusions) once a real operator uses this.
+RESOLUTION_REASONS = [
+    "cattle",
+    "vegetation",
+    "authorized_personnel",
+    "genuine_intrusion",
+    "patrol_dispatched",
+]
+
 
 class IncidentStore:
     """Persists alert-worthy events to a local, queryable `incidents.db` and
@@ -31,6 +46,7 @@ class IncidentStore:
         self._fernet = Fernet(self._load_or_create_key(key_path))
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._create_table()
+        self._migrate_schema()
 
     def _load_or_create_key(self, key_path: str) -> bytes:
         os.makedirs(os.path.dirname(key_path) or ".", exist_ok=True)
@@ -62,6 +78,48 @@ class IncidentStore:
             """
         )
         self._conn.commit()
+
+    def _migrate_schema(self) -> None:
+        """Adds operator-workflow columns to a pre-existing incidents.db
+        without touching its existing rows — ALTER TABLE ADD COLUMN only,
+        never a table rebuild, so real incident history survives the
+        upgrade. Safe to call on every startup: only missing columns are added.
+        """
+        cur = self._conn.execute("PRAGMA table_info(incidents)")
+        existing = {row[1] for row in cur.fetchall()}
+        new_columns = {
+            "status": f"TEXT NOT NULL DEFAULT '{STATUS_OPEN}'",
+            "acknowledged_by": "TEXT",
+            "acknowledged_at": "REAL",
+            "resolved_by": "TEXT",
+            "resolved_at": "REAL",
+            "resolution_reason": "TEXT",
+        }
+        for column, definition in new_columns.items():
+            if column not in existing:
+                self._conn.execute(f"ALTER TABLE incidents ADD COLUMN {column} {definition}")
+        self._conn.commit()
+
+    def acknowledge(self, incident_id: int, operator: str) -> None:
+        now = time.time()
+        self._conn.execute(
+            "UPDATE incidents SET status = ?, acknowledged_by = ?, acknowledged_at = ? WHERE id = ?",
+            (STATUS_ACKNOWLEDGED, operator, now, incident_id),
+        )
+        self._conn.commit()
+        log.info("Incident #%d acknowledged by %s", incident_id, operator)
+
+    def resolve(self, incident_id: int, operator: str, reason: str) -> None:
+        if reason not in RESOLUTION_REASONS:
+            raise ValueError(f"Unknown resolution reason: {reason!r}, expected one of {RESOLUTION_REASONS}")
+        now = time.time()
+        self._conn.execute(
+            "UPDATE incidents SET status = ?, resolved_by = ?, resolved_at = ?, resolution_reason = ? "
+            "WHERE id = ?",
+            (STATUS_RESOLVED, operator, now, reason, incident_id),
+        )
+        self._conn.commit()
+        log.info("Incident #%d resolved by %s (%s)", incident_id, operator, reason)
 
     def record(self, det, score, frame, crop_frame=None, burst_frames=None) -> int:
         timestamp = time.time()
@@ -116,11 +174,27 @@ class IncidentStore:
     def list_incidents(self, limit: int = 50) -> list:
         cur = self._conn.execute(
             "SELECT id, track_id, person_id, category, zone_tier, score, tier, timestamp, "
-            "snapshot_path, crop_path, burst_paths FROM incidents ORDER BY id DESC LIMIT ?",
+            "snapshot_path, crop_path, burst_paths, status, acknowledged_by, acknowledged_at, "
+            "resolved_by, resolved_at, resolution_reason "
+            "FROM incidents ORDER BY id DESC LIMIT ?",
             (limit,),
         )
         columns = [d[0] for d in cur.description]
         return [dict(zip(columns, row)) for row in cur.fetchall()]
+
+    def get_incident(self, incident_id: int) -> "dict | None":
+        cur = self._conn.execute(
+            "SELECT id, track_id, person_id, category, zone_tier, score, tier, timestamp, "
+            "snapshot_path, crop_path, burst_paths, status, acknowledged_by, acknowledged_at, "
+            "resolved_by, resolved_at, resolution_reason "
+            "FROM incidents WHERE id = ?",
+            (incident_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        columns = [d[0] for d in cur.description]
+        return dict(zip(columns, row))
 
     def close(self) -> None:
         self._conn.close()
