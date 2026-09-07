@@ -7,6 +7,7 @@ import cv2
 
 from activity_gate.gate import ActivityGate
 from alerts.alert_manager import AlertManager
+from camera.health import CameraErrorIsolator, CameraHealth
 from camera.stream_manager import StreamManager
 from config.settings import (
     ALERT_COOLDOWN_SECONDS,
@@ -154,67 +155,90 @@ def main() -> None:
     frame_buffers = {name: deque(maxlen=3) for name in CAMERA_SOURCES}
     last_frame_time = {name: None for name in CAMERA_SOURCES}
     fps_ema = {name: 0.0 for name in CAMERA_SOURCES}
+    isolator = CameraErrorIsolator()
+    last_health: dict[str, str] = {}
+
+    def process_camera_frame(name: str, frame) -> None:
+        """The full per-camera pipeline for one frame.
+
+        Runs behind `isolator` below, so anything raised in here costs this
+        one frame on this one camera instead of the whole loop.
+        """
+        active, motion_score = gates[name].is_active(frame)
+        frame_counters[name] += 1
+
+        # High activity: run the full pipeline every frame.
+        # Idle: only run it every Nth frame (low-FPS keep-alive).
+        should_process = active or (frame_counters[name] % LOW_FPS_INTERVAL == 0)
+        if not should_process:
+            return
+
+        now = time.perf_counter()
+        if last_frame_time[name] is not None:
+            instant_fps = 1.0 / max(now - last_frame_time[name], 1e-6)
+            fps_ema[name] = (0.9 * fps_ema[name]) + (0.1 * instant_fps)
+        last_frame_time[name] = now
+
+        preprocessor = preprocessors[name]
+        processed = preprocessor.process(frame)
+
+        detections = trackers[name].track(processed)
+        detections = false_alarm_filters[name].filter(detections)
+        for det in detections:
+            if det.track_id is not None and det.category() == "person":
+                det.person_id = person_gallery.resolve(
+                    (name, det.track_id), processed, det.box
+                )
+            x1, y1, x2, y2 = det.box
+            ground_point = ((x1 + x2) // 2, y2)
+            zone_result = zone_engines[name].classify(ground_point, det.direction)
+            det.zone_tier = zone_result["tier"]
+            det.zone_direction = zone_result["direction"]
+
+            if det.category() == "person":
+                _face_box, embedding = face_recognizer.embed(processed, det.box)
+                if embedding is not None:
+                    match_name, similarity = watchlist_matcher.match(embedding)
+                    det.watchlist_match = match_name
+                    det.watchlist_similarity = similarity
+
+        draw_detections(processed, detections)
+
+        scores = [
+            draw_threat_score_overlay(processed, det, threat_scorer) for det in detections
+        ]
+
+        draw_debug_overlay(processed, preprocessor, active, motion_score)
+        draw_fps_overlay(processed, fps_ema[name])
+        zone_drawers[name].draw_overlay(processed)
+
+        frame_buffers[name].append(processed.copy())
+        for det, score in zip(detections, scores):
+            alert_manager.handle(det, score, list(frame_buffers[name]))
+
+        cv2.imshow(window_names[name], processed)
 
     try:
         while True:
+            health = manager.health()
+            if health != last_health:
+                degraded = {n: s for n, s in health.items() if s != CameraHealth.ONLINE}
+                if degraded:
+                    log.warning("Camera health changed — degraded: %s (all: %s)", degraded, health)
+                else:
+                    log.info("Camera health changed — all cameras ONLINE")
+                last_health = health
+
             frames = manager.read_all()
             for name, frame in frames.items():
                 if frame is None:
                     continue
-
-                active, motion_score = gates[name].is_active(frame)
-                frame_counters[name] += 1
-
-                # High activity: run the full pipeline every frame.
-                # Idle: only run it every Nth frame (low-FPS keep-alive).
-                should_process = active or (frame_counters[name] % LOW_FPS_INTERVAL == 0)
-                if not should_process:
-                    continue
-
-                now = time.perf_counter()
-                if last_frame_time[name] is not None:
-                    instant_fps = 1.0 / max(now - last_frame_time[name], 1e-6)
-                    fps_ema[name] = (0.9 * fps_ema[name]) + (0.1 * instant_fps)
-                last_frame_time[name] = now
-
-                preprocessor = preprocessors[name]
-                processed = preprocessor.process(frame)
-
-                detections = trackers[name].track(processed)
-                detections = false_alarm_filters[name].filter(detections)
-                for det in detections:
-                    if det.track_id is not None and det.category() == "person":
-                        det.person_id = person_gallery.resolve(
-                            (name, det.track_id), processed, det.box
-                        )
-                    x1, y1, x2, y2 = det.box
-                    ground_point = ((x1 + x2) // 2, y2)
-                    zone_result = zone_engines[name].classify(ground_point, det.direction)
-                    det.zone_tier = zone_result["tier"]
-                    det.zone_direction = zone_result["direction"]
-
-                    if det.category() == "person":
-                        _face_box, embedding = face_recognizer.embed(processed, det.box)
-                        if embedding is not None:
-                            match_name, similarity = watchlist_matcher.match(embedding)
-                            det.watchlist_match = match_name
-                            det.watchlist_similarity = similarity
-
-                draw_detections(processed, detections)
-
-                scores = [
-                    draw_threat_score_overlay(processed, det, threat_scorer) for det in detections
-                ]
-
-                draw_debug_overlay(processed, preprocessor, active, motion_score)
-                draw_fps_overlay(processed, fps_ema[name])
-                zone_drawers[name].draw_overlay(processed)
-
-                frame_buffers[name].append(processed.copy())
-                for det, score in zip(detections, scores):
-                    alert_manager.handle(det, score, list(frame_buffers[name]))
-
-                cv2.imshow(window_names[name], processed)
+                # Per-camera failure boundary: a pipeline exception on one
+                # camera drops that frame, is logged with the camera id and a
+                # traceback, and leaves every other camera still processing.
+                isolator.run(
+                    name, process_camera_frame, name, frame, stage="frame-pipeline"
+                )
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
