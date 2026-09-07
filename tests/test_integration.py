@@ -51,6 +51,13 @@ class TestSyslogNotifier(unittest.TestCase):
             self.fail(f"emit() must not raise, but raised: {e}")
 
 
+API_TEST_TOKEN = "integration-test-token-not-a-real-secret"
+
+
+def _auth_header() -> dict:
+    return {"Authorization": f"Bearer {API_TEST_TOKEN}"}
+
+
 class TestIncidentAPI(unittest.TestCase):
     def test_incidents_endpoint_returns_recorded_incidents(self):
         from fastapi.testclient import TestClient
@@ -79,9 +86,14 @@ class TestIncidentAPI(unittest.TestCase):
         def patched_init(self, *args, **kwargs):
             original_init(self, db_path=db_path, evidence_dir=evidence_dir, key_path=key_path)
 
-        with patch.object(IncidentStore, "__init__", patched_init):
+        # The API now requires a bearer token (Phase 0B item 2); this test
+        # covers the incident payload, not the auth boundary (see
+        # tests/test_api_auth.py), so it authenticates with a patched token.
+        with patch.object(IncidentStore, "__init__", patched_init), patch.object(
+            api_module, "API_TOKEN", API_TEST_TOKEN
+        ):
             client = TestClient(api_module.app)
-            response = client.get("/incidents")
+            response = client.get("/incidents", headers=_auth_header())
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
@@ -93,8 +105,9 @@ class TestIncidentAPI(unittest.TestCase):
 
         import integration.api as api_module
 
-        client = TestClient(api_module.app)
-        response = client.get("/status")
+        with patch.object(api_module, "API_TOKEN", API_TEST_TOKEN):
+            client = TestClient(api_module.app)
+            response = client.get("/status", headers=_auth_header())
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")

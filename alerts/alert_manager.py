@@ -51,6 +51,7 @@ class AlertManager:
         webhook=None,
         syslog=None,
         state_ttl_seconds: float = 300.0,
+        dispatcher=None,
     ):
         self.snapshot_dir = snapshot_dir
         self.cooldown_seconds = cooldown_seconds
@@ -58,6 +59,14 @@ class AlertManager:
         self.incident_store = incident_store
         self.webhook = webhook
         self.syslog = syslog
+        # Optional `AlertDispatcher` (alerts/dispatch.py). When set, the slow
+        # side effects — webhook POST, syslog emit, evidence persistence — are
+        # handed to its background worker instead of running on the frame
+        # path. Tier/escalation/cooldown decisions stay synchronous either
+        # way, so alert semantics are identical; only *when* the I/O happens
+        # changes. Left None (the default) everything runs inline exactly as
+        # before, which is what the unit tests rely on.
+        self.dispatcher = dispatcher
         os.makedirs(snapshot_dir, exist_ok=True)
         # Per-track alert state is keyed by an identity that churns (ByteTrack
         # mints a new id on every re-acquisition), so keeping it forever means
@@ -98,7 +107,7 @@ class AlertManager:
 
         self._last_tier[track_key] = tier
         self._last_alert_time[track_key] = now
-        self._notify_integrations(det, score, track_key, now)
+        self._offload("notify_integrations", self._notify_integrations, det, score, track_key, now)
 
         if tier == "yellow":
             log.info(
@@ -106,7 +115,7 @@ class AlertManager:
                 det.category(), track_key, score.total,
             )
             self._play(self._yellow_chime)
-            self._record_evidence(det, score, recent_frames[-1:])
+            self._offload("record_evidence", self._record_evidence, det, score, recent_frames[-1:])
         elif tier == "red":
             log.warning(
                 "RED ALERT: %s #%s score=%.0f — siren + snapshot burst",
@@ -118,7 +127,21 @@ class AlertManager:
                 det.zone_tier, tier, score.total, now,
             )
             self._play(self._red_siren)
-            self._record_evidence(det, score, recent_frames)
+            self._offload("record_evidence", self._record_evidence, det, score, recent_frames)
+
+    def _offload(self, job_name: str, fn, *args) -> None:
+        """Runs an alert side effect off the frame path when a dispatcher is
+        wired in, inline otherwise.
+
+        A rejected submission (queue full) is already logged and counted by the
+        dispatcher; the alert itself has been logged and rate-limit state
+        recorded before we get here, so the alert is never lost — only this
+        one delivery/persistence attempt is.
+        """
+        if self.dispatcher is None:
+            fn(*args)
+            return
+        self.dispatcher.submit(job_name, fn, *args)
 
     def _purge_stale(self, now: float) -> None:
         """Evicts alert state for identities not seen for `state_ttl_seconds`.

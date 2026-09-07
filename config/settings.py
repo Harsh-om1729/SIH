@@ -57,6 +57,8 @@ CURFEW_END_HOUR = int(os.getenv("CURFEW_END_HOUR", "5"))
 
 # Seconds between repeat alerts for the same track at the same tier
 ALERT_COOLDOWN_SECONDS = float(os.getenv("ALERT_COOLDOWN_SECONDS", "8"))
+# Bounded queue for off-thread alert side effects (webhook + evidence).
+ALERT_DISPATCH_QUEUE_SIZE = int(os.getenv("ALERT_DISPATCH_QUEUE_SIZE", "64"))
 
 # Cosine similarity (0-1) above which a face is treated as a watchlist match
 WATCHLIST_SIMILARITY_THRESHOLD = float(os.getenv("WATCHLIST_SIMILARITY_THRESHOLD", "0.5"))
@@ -67,6 +69,16 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 # Syslog target for alert events (UDP; fire-and-forget, safe if unreachable)
 SYSLOG_HOST = os.getenv("SYSLOG_HOST", "localhost")
 SYSLOG_PORT = int(os.getenv("SYSLOG_PORT", "514"))
+
+# Bearer token guarding the integration REST API (integration/api.py).
+# No default: unset means the API refuses every request rather than serving
+# the incident feed unauthenticated. Never commit a real value.
+API_TOKEN = os.getenv("IBVAP_API_TOKEN", "")
+
+# Fernet key protecting watchlist face embeddings at rest (face/watchlist.py).
+# Same mechanism as the evidence store; kept in its own file so biometric data
+# and evidence data do not share one key.
+WATCHLIST_KEY_PATH = os.getenv("WATCHLIST_KEY_PATH", "database/watchlist.key")
 
 
 def configure_logging() -> None:

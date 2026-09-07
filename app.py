@@ -7,10 +7,12 @@ import cv2
 
 from activity_gate.gate import ActivityGate
 from alerts.alert_manager import AlertManager
+from alerts.dispatch import AlertDispatcher
 from camera.health import CameraErrorIsolator, CameraHealth
 from camera.stream_manager import StreamManager
 from config.settings import (
     ALERT_COOLDOWN_SECONDS,
+    ALERT_DISPATCH_QUEUE_SIZE,
     BRIGHTNESS_THRESHOLD,
     CAMERA_HEIGHT,
     CAMERA_SOURCES,
@@ -146,11 +148,15 @@ def main() -> None:
     incident_store = IncidentStore()
     webhook = WebhookNotifier(url=WEBHOOK_URL)
     syslog = SyslogNotifier(host=SYSLOG_HOST, port=SYSLOG_PORT)
+    # Webhook POSTs and evidence persistence run on this bounded background
+    # worker so a slow/unreachable C2 host or disk cannot stall the camera loop.
+    alert_dispatcher = AlertDispatcher(maxsize=ALERT_DISPATCH_QUEUE_SIZE)
     alert_manager = AlertManager(
         cooldown_seconds=ALERT_COOLDOWN_SECONDS,
         incident_store=incident_store,
         webhook=webhook,
         syslog=syslog,
+        dispatcher=alert_dispatcher,
     )
     frame_buffers = {name: deque(maxlen=3) for name in CAMERA_SOURCES}
     last_frame_time = {name: None for name in CAMERA_SOURCES}
@@ -247,6 +253,8 @@ def main() -> None:
                 drawer.handle_key(key)
     finally:
         manager.stop_all()
+        # Drain queued webhook/evidence work before closing the stores it uses.
+        alert_dispatcher.stop()
         threat_rules.close()
         incident_store.close()
         watchlist_db.close()
