@@ -1,0 +1,53 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg-primary: #0a0f0d;
+  --bg-surface: #111917;
+  --bg-elevated: #16201d;
+  --border-subtle: #25322e;
+  --text-muted: #5c6f68;
+  --text-dim: #8fa39b;
+  --text-primary: #e6ece9;
+  --accent-teal: #5fd6c4;
+  --accent-green: #4fbf7a;
+  --accent-green-deep: #2f6e64;
+  --accent-yellow: #e6c34a;
+  --accent-red: #e5484d;
+}
+
+@layer base {
+  body {
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+
+  /* Custom tactical scrollbar */
+  ::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: #0a0f0d;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: #25322e;
+    border-radius: 3px;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: #5c6f68;
+  }
+}
+
+/* Subtle tactical radar / scanline background pattern */
+.bg-tactical-grid {
+  background-size: 24px 24px;
+  background-image: 
+    linear-gradient(to right, rgba(37, 50, 46, 0.25) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(37, 50, 46, 0.25) 1px, transparent 1px);
+}
