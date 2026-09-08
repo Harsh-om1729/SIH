@@ -27,6 +27,7 @@ placeholder above always worked (a plain per-tick update, nothing manual).
 
 import os
 import sys
+import time
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -47,7 +48,7 @@ from config.settings import (
     CURFEW_START_HOUR,
     DETECTION_CONFIDENCE,
     DETECTION_MODEL_PATH,
-    LOW_FPS_INTERVAL,
+    IDLE_MIN_FPS,
     MOTION_THRESHOLD,
 )
 from database.incident_store import RESOLUTION_REASONS, IncidentStore
@@ -103,6 +104,7 @@ def build_pipeline():
             cooldown_seconds=ALERT_COOLDOWN_SECONDS, incident_store=incident_store
         ),
         "frame_counters": {n: 0 for n in CAMERA_SOURCES},
+        "last_processed": {n: None for n in CAMERA_SOURCES},
         "frame_buffers": {n: [] for n in CAMERA_SOURCES},
     }
 
@@ -136,9 +138,16 @@ with col_video:
 
             active, _motion_score = pipeline["gates"][name].is_active(frame)
             pipeline["frame_counters"][name] += 1
-            should_process = active or (pipeline["frame_counters"][name] % LOW_FPS_INTERVAL == 0)
-            if not should_process:
+
+            # Same idle floor as app.py: a still scene still refreshes at
+            # IDLE_MIN_FPS instead of stalling. This fragment reruns every
+            # 0.2s, so that interval is the practical ceiling here.
+            now = time.perf_counter()
+            last_processed = pipeline["last_processed"][name]
+            due = last_processed is None or (now - last_processed) >= 1.0 / IDLE_MIN_FPS
+            if not (active or due):
                 continue
+            pipeline["last_processed"][name] = now
 
             processed = pipeline["preprocessors"][name].process(frame)
             detections = pipeline["trackers"][name].track(processed)
@@ -204,6 +213,17 @@ with col_incidents:
                     f"**#{inc['id']}** · {ts} · {inc['category']} · zone={inc['zone_tier']} · "
                     f"score={inc['score']:.0f} ({inc['tier']}) · {badge}"
                 )
+
+                if inc.get("snapshot_path") and os.path.exists(inc["snapshot_path"]):
+                    with st.expander("📷 View Evidence Snapshot"):
+                        try:
+                            img_bytes = pipeline["incident_store"].decrypt_image_bytes(inc["snapshot_path"])
+                            st.image(img_bytes, caption=f"Snapshot #{inc['id']}", use_container_width=True)
+                            if inc.get("crop_path") and os.path.exists(inc["crop_path"]):
+                                crop_bytes = pipeline["incident_store"].decrypt_image_bytes(inc["crop_path"])
+                                st.image(crop_bytes, caption=f"Cropped Target #{inc['id']}", width=150)
+                        except Exception as e:
+                            st.caption(f"Failed to decrypt evidence: {e}")
 
                 if status == "resolved":
                     st.caption(

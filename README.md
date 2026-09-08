@@ -23,7 +23,7 @@ python app.py
 - [x] Phase 4 — YOLO Detection
 - [x] Phase 5 — ONNX + INT8 + OpenVINO (ONNX fp32 adopted; INT8/OpenVINO documented as Intel-hardware-dependent, see below)
 - [x] Phase 6 — Tracking (ByteTrack)
-- [x] Phase 7 — False-Alarm Filter (aspect-ratio check + ResNet-18 appearance-based Re-ID gallery for stable person IDs across brief disappearances)
+- [x] Phase 7 — False-Alarm Filter (aspect-ratio check + OSNet appearance-based Re-ID gallery for stable person IDs across brief disappearances)
 - [x] Phase 7A — Vehicle Classification (already satisfied by YOLO's granular COCO classes — car/truck/bus/motorcycle/bicycle shown distinctly, verified against recorded footage; tractor class + Indian-vehicle fine-tuning remain future work, no labeled dataset available)
 - [x] Phase 8 — 3-Zone Tactical Logic (interactive click-to-draw zones on the existing OpenCV window in place of the Phase 13 dashboard UI; Red/Yellow/Green priority, Yellow inward/outward direction, Green curfew re-tiering — all covered by unit tests, red zone also live-verified)
 - [x] Phase 9 — Offline Threat Intelligence (SQLite `threat_rules.db`: sector/time/class-confidence lookups + movement config, seeded once and never overwritten so local tuning persists; unit tested, live-verified via diagnostic overlay)
@@ -33,7 +33,7 @@ python app.py
 - [x] Phase 12A — Facial Recognition + Watchlist (face detection+embedding via InsightFace buffalo_s — since Phase 4 never added a separate YOLOv8-Face detector, this fills that gap too; SQLite watchlist.db, cosine match escalates to Red regardless of zone; unit tested + live-verified with a real photo. **DPDP Act caveat**: any real deployment of a watchlist DB of biometric face data needs authorized data-handling procedures under India's DPDP Act — not just a modeling detail)
 - [x] Phase 13 — Local Dashboard (Streamlit prototype: live annotated feed + recent-incidents table, reusing the exact same pipeline as app.py; zone drawing stays in the OpenCV app's Phase 8 drawer, loaded read-only here; live-verified in browser)
 - [x] Phase 14 — Offline / Air-Gapped Operation (live-verified with Wi-Fi fully disabled: detect→track→score→alert→DB all worked; also added encrypted USB-transfer bundle scripts for threat_rules.db/watchlist.db updates, unit tested)
-- [x] Phase 15 — Cross-Camera Re-ID (single shared `PersonGallery` across all cameras, keyed by `(camera_name, track_id)` to prevent cross-camera ID collisions; unit tested + live-verified with 2 simultaneous streams — different people stayed on distinct IDs, no false merging)
+- [x] Phase 15 — Cross-Camera Re-ID (single shared `PersonGallery` across all cameras, keyed by `(camera_name, track_id)` to prevent cross-camera ID collisions; unit tested + live-verified with 2 simultaneous streams. NOTE: the original "no false merging" claim here did not hold — later measurement showed the ImageNet ResNet-18 embedding merged different people; see the Phase 7 notes for the diagnosis and the OSNet fix.)
 - [x] Phase 16 — Command & Control Integration (FastAPI `/incidents` + `/status` JSON endpoints, outbound webhook, syslog-formatted UDP events — all fail-safe/non-blocking if unreachable; VHF/LoRa stays a logged stand-in per Phase 11, no real radio hardware; unit tested + live-verified)
 
 ## Phase 5 benchmark notes (measured on Apple M4, run via `scripts/benchmark_models.py`)
@@ -72,15 +72,47 @@ Two embedding approaches were tried, in order:
    meaningless for low-saturation pixels. Verified via live testing (multiple
    people got merged into the same ID), not just theorized.
 2. **ResNet-18 embedding** (ImageNet-pretrained, classification head removed,
-   512-d feature) — the roadmap's other named option for this phase. Captures
-   shape/texture/pattern, not just color, and reliably separated people in
-   similar clothing in testing. Adopted as the default.
+   512-d feature) — the roadmap's other named option for this phase. Better
+   than the histogram, but *also merged different people*, and this was
+   measured rather than eyeballed: on real pedestrian crops, unrelated people
+   scored up to **0.795** cosine similarity while the configured gate was
+   0.70, so strangers matched. Root cause is that ImageNet features describe
+   generic texture/shape — the network was never trained to encode *which
+   person* this is. Replaced.
+3. **OSNet x0.25 / MSMT17** (`models/osnet_x0_25_msmt17.onnx`, 907KB, run via
+   onnxruntime) — trained for person Re-ID specifically. On the same crops:
+   unrelated people at most **0.501**, same person under box jitter at least
+   **0.872** — a separation gap of 0.371 vs ResNet-18's 0.139, so the 0.70
+   gate now sits in clear space instead of inside the noise. Also *faster*:
+   2.9ms/crop vs 7.6ms. Weights ship in `models/` and are never fetched at
+   runtime, so Phase 14 air-gapped operation is unaffected. Adopted as the
+   default.
+
+Three gallery-logic bugs found alongside this, all of which independently
+caused different people to share one `person_id`:
+- **No mutual exclusion** — nothing stopped two people standing in frame *at
+  the same time* from both matching the same gallery entry. A person can only
+  be in one place, so an identity held by another track seen within the last
+  `live_window_seconds` is now excluded from matching. Regression-tested
+  (`TestSimultaneousPeople`); the test fails against the old code.
+- **Match overwrote the gallery entry** instead of blending into it, so a
+  single borderline match redefined that identity as whoever matched last and
+  dragged further people onto it.
+- **No margin test** — the best match won even when the runner-up was a
+  hair behind, i.e. exactly when the embedding was *not* separating those two
+  people. Now requires `REID_MATCH_MARGIN` (default 0.05) of daylight, else a
+  new id is minted rather than guessing.
+
+Also fixed a latent `KeyError` crash: a track's `last_seen` refreshed every
+frame but its gallery entry's only refreshed on frames that produced an
+embedding, so a long track at small box size could have its gallery entry
+purged while still bound, then crash on the next good frame.
 
 Other measures that mattered in practice: deciding a new track's identity
 from the *average* of its first few embeddings (not a single frame) to cancel
 out noise from partial/edge-clipped boxes, and skipping embedding entirely for
 boxes below a minimum size. Both configurable: `REID_SIMILARITY_THRESHOLD`,
-`REID_TTL_SECONDS` in `.env`.
+`REID_TTL_SECONDS`, `REID_MATCH_MARGIN`, `REID_MODEL_PATH` in `.env`.
 
 ## Detection model & confidence notes
 
@@ -254,8 +286,9 @@ workarounds when the plain, direct approach already works.
 ## FPS: throttled Re-ID / face recognition (app.py)
 
 Directly measured (not assumed) per-call cost on this machine: YOLOv8s +
-ByteTrack ~12ms/frame, ResNet-18 Re-ID embed ~7.6ms, InsightFace embed
-~6.4ms — and both Re-ID and face/watchlist recognition were running on
+ByteTrack ~12ms/frame, Re-ID embed ~7.6ms (ResNet-18; now 2.9ms since the
+switch to OSNet x0.25, but the throttle below still pays for itself with
+multiple people in frame), InsightFace embed ~6.4ms — and both Re-ID and face/watchlist recognition were running on
 *every single frame, for every detected person*, even once that person's
 identity was already resolved. That's ~14ms/person/frame of avoidable
 repeated work, since appearance barely changes frame-to-frame once known.

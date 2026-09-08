@@ -68,10 +68,19 @@ class AlertManager:
         track_key = det.person_id if det.person_id is not None else det.track_id
         if track_key is None:
             return
+        # Two different id namespaces reach this point: a Re-ID person_id, and
+        # a raw track_id for a detection whose identity hasn't resolved yet
+        # (still buffering samples, or box too small to embed). Printing both
+        # as "person #N" made a track_id look like a person_id in the log —
+        # e.g. "person #247" in a run that only ever issued 20 person_ids.
+        # Label them the way the video overlay already does: #N vs TN.
+        label = (
+            f"#{det.person_id}" if det.person_id is not None else f"T{det.track_id}"
+        )
         tier = score.tier
 
         if tier == "green":
-            log.debug("Green: %s #%s score=%.0f", det.category(), track_key, score.total)
+            log.debug("Green: %s %s score=%.0f", det.category(), label, score.total)
             self._last_tier[track_key] = tier
             return
 
@@ -90,15 +99,18 @@ class AlertManager:
 
         if tier == "yellow":
             log.info(
-                "YELLOW ALERT: %s #%s score=%.0f — chime + snapshot",
-                det.category(), track_key, score.total,
+                "YELLOW ALERT: %s %s score=%.0f [%s] — chime + snapshot",
+                det.category(), label, score.total, score.breakdown(),
             )
             self._play(self._yellow_chime)
             self._record_evidence(det, score, recent_frames[-1:])
         elif tier == "red":
+            # The breakdown is the whole point of an additive score: a sentry
+            # needs to see which component drove a Red, and whether an override
+            # forced it, not just the number.
             log.warning(
-                "RED ALERT: %s #%s score=%.0f — siren + snapshot burst",
-                det.category(), track_key, score.total,
+                "RED ALERT: %s %s score=%.0f [%s] — siren + snapshot burst",
+                det.category(), label, score.total, score.breakdown(),
             )
             log.warning(
                 "  [radio-metadata stub] zone=%s tier=%s score=%.0f ts=%.0f "

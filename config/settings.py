@@ -30,8 +30,13 @@ BRIGHTNESS_THRESHOLD = float(os.getenv("BRIGHTNESS_THRESHOLD", "90"))
 # Mean grayscale frame-diff above this counts as "activity detected"
 MOTION_THRESHOLD = float(os.getenv("MOTION_THRESHOLD", "2.0"))
 
-# When idle, only run the full pipeline every Nth frame (low-FPS keep-alive)
-LOW_FPS_INTERVAL = int(os.getenv("LOW_FPS_INTERVAL", "10"))
+# When idle, run the full pipeline at (at least) this many frames per second —
+# a keep-alive floor, not a cap: as soon as the activity gate sees motion, every
+# frame is processed again. This was a frame-count divisor ("every Nth frame"),
+# which made the idle rate depend on the camera: the same divisor of 10 gave
+# 3 fps on a 30 fps webcam and 1.5 fps on a 15 fps one. A rate in fps is what
+# an operator actually wants to specify, and it holds across mismatched cameras.
+IDLE_MIN_FPS = float(os.getenv("IDLE_MIN_FPS", "20"))
 
 # Minimum YOLO confidence to keep a detection
 DETECTION_CONFIDENCE = float(os.getenv("DETECTION_CONFIDENCE", "0.5"))
@@ -46,7 +51,21 @@ CAMERA_HEIGHT = int(os.getenv("CAMERA_HEIGHT", "480"))
 
 # Re-ID: cosine similarity (0-1) above which a reappearing track is matched
 # back to an existing person instead of being treated as a new one
-REID_SIMILARITY_THRESHOLD = float(os.getenv("REID_SIMILARITY_THRESHOLD", "0.7"))
+# Measured on real pedestrian crops with the OSNet embedder: unrelated people
+# score at most ~0.50, the same person under box jitter at least ~0.87. 0.70
+# sits in the middle of that gap. (It was also 0.70 under the old ImageNet
+# ResNet-18, but there unrelated people reached 0.795 — above the gate — which
+# is what merged strangers onto one person_id.)
+REID_SIMILARITY_THRESHOLD = float(os.getenv("REID_SIMILARITY_THRESHOLD", "0.70"))
+
+# Re-ID: how far the best-matching person must beat the second-best before the
+# match is trusted. Near-tied candidates mean the embedding isn't actually
+# telling those people apart, so the gallery mints a new id rather than guess.
+REID_MATCH_MARGIN = float(os.getenv("REID_MATCH_MARGIN", "0.05"))
+
+# Person Re-ID appearance model (OSNet x0.25 / MSMT17). Bundled in models/ and
+# never fetched at runtime, so air-gapped operation still works.
+REID_MODEL_PATH = os.getenv("REID_MODEL_PATH", "models/osnet_x0_25_msmt17.onnx")
 
 # Re-ID: how long (seconds) a disappeared person stays eligible for matching
 REID_TTL_SECONDS = float(os.getenv("REID_TTL_SECONDS", "30"))

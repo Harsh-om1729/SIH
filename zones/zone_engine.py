@@ -98,21 +98,78 @@ class ZoneEngine:
 
         best = max(matches, key=lambda z: ZONE_PRIORITY[z.zone_type])
         tier = best.zone_type
-        direction_label = None
-
-        if tier == "yellow" and direction is not None:
-            red_zones = [z for z in self.zones if z.zone_type == "red"]
-            if red_zones:
-                zx, zy = best.centroid()
-                rx, ry = min(
-                    (z.centroid() for z in red_zones),
-                    key=lambda c: (c[0] - zx) ** 2 + (c[1] - zy) ** 2,
-                )
-                inward_vec = (rx - zx, ry - zy)
-                dot = direction[0] * inward_vec[0] + direction[1] * inward_vec[1]
-                direction_label = "inward" if dot > 0 else "outward"
+        direction_label = self._direction_label(best, tier, direction)
 
         if tier == "green" and self._is_curfew():
             tier = "yellow"  # curfew re-tiering
 
         return {"tier": tier, "direction": direction_label}
+
+    # A track's direction vector is a displacement summed over the recent
+    # history window, so it is never exactly zero — camera shake and box jitter
+    # alone produce a pixel or two. Below this, treat the subject as stationary
+    # and report no direction, rather than reading a crossing out of noise (and
+    # tripping the border-crossing override on someone standing still).
+    MIN_DIRECTION_MAGNITUDE = 4.0
+
+    def _direction_label(self, zone, tier: str, direction) -> "str | None":
+        """Movement relative to the border line.
+
+        Red zone = the line itself, so movement through it is a crossing. The
+        sign comes from the nearest Green zone (own territory): moving away
+        from own side is "outward" (exfiltration/smuggling), toward it is
+        "inward" (infiltration). With no Green zone drawn there is no way to
+        tell the two apart, so it is reported as a plain "crossing" — still a
+        breach, just without the sense.
+
+        Yellow zone = the approach strip, so the reference is the nearest Red
+        zone: moving toward the line is "inward".
+
+        Movement across neither axis is "parallel" — travelling along the
+        fence rather than at it, which is what reconnaissance looks like.
+        """
+        if direction is None:
+            return None
+        magnitude = (direction[0] ** 2 + direction[1] ** 2) ** 0.5
+        if magnitude < self.MIN_DIRECTION_MAGNITUDE:
+            return None  # stationary
+
+        if tier == "red":
+            reference = self._nearest_centroid(zone, "green")
+            if reference is None:
+                return "crossing"
+            zx, zy = zone.centroid()
+            # Vector pointing from own territory out toward the line.
+            axis = (zx - reference[0], zy - reference[1])
+            label_positive, label_negative = "outward", "inward"
+        elif tier == "yellow":
+            reference = self._nearest_centroid(zone, "red")
+            if reference is None:
+                return None
+            zx, zy = zone.centroid()
+            axis = (reference[0] - zx, reference[1] - zy)
+            label_positive, label_negative = "inward", "outward"
+        else:
+            return None
+
+        axis_magnitude = (axis[0] ** 2 + axis[1] ** 2) ** 0.5
+        if axis_magnitude == 0:
+            return None
+        # Cosine between travel and the border axis. Near zero means moving
+        # along the line rather than across it.
+        cosine = (
+            direction[0] * axis[0] + direction[1] * axis[1]
+        ) / (magnitude * axis_magnitude)
+        if abs(cosine) < 0.35:  # within ~20 degrees of parallel to the line
+            return "parallel"
+        return label_positive if cosine > 0 else label_negative
+
+    def _nearest_centroid(self, zone, zone_type: str) -> "tuple | None":
+        candidates = [z for z in self.zones if z.zone_type == zone_type and z is not zone]
+        if not candidates:
+            return None
+        zx, zy = zone.centroid()
+        return min(
+            (z.centroid() for z in candidates),
+            key=lambda c: (c[0] - zx) ** 2 + (c[1] - zy) ** 2,
+        )
