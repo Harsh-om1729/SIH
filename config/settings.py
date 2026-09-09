@@ -5,6 +5,33 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# --- ONNX Runtime thread limits --------------------------------------------
+# MUST be set before onnxruntime is imported, which is why it lives here: both
+# app.py and scripts/bench_pipeline.py import config.settings before any module
+# that pulls in ORT (face/, reid/, tracking/).
+#
+# The pipeline runs three independent ORT sessions per frame — YOLO, OSNet
+# Re-ID, InsightFace. Left to itself each one sizes its intra-op pool to the
+# whole machine (10 cores here), so three sessions oversubscribe the CPU and
+# spend their time contending rather than computing. Measured over 3 passes of
+# scripts/bench_pipeline.py on this machine, running the three interleaved:
+#
+#   threads   ms/frame   fps    CPU (100% = 1 core)
+#   default      41.6    24.0        696%
+#   2            25.5    39.3        362%      <- chosen
+#   1            31.7    31.6        101%
+#
+# 2 is the latency optimum. Set ORT_NUM_THREADS=1 instead on a machine that has
+# to share its CPU with other work: 24% slower than 2, but a seventh of the CPU
+# and still faster than the unbounded default. 0 restores ORT's own choice.
+ORT_NUM_THREADS = int(os.getenv("ORT_NUM_THREADS", "2"))
+if ORT_NUM_THREADS > 0:
+    for _var in (
+        "OMP_NUM_THREADS", "ORT_INTRA_OP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+    ):
+        os.environ.setdefault(_var, str(ORT_NUM_THREADS))
+
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 
 # Comma-separated name=source pairs, e.g. "cam0=0,cam1=rtsp://user:pass@host/stream"
@@ -73,6 +100,40 @@ REID_TTL_SECONDS = float(os.getenv("REID_TTL_SECONDS", "30"))
 # Green zones are re-tiered to "yellow" during this hour window (wraps midnight)
 CURFEW_START_HOUR = int(os.getenv("CURFEW_START_HOUR", "23"))
 CURFEW_END_HOUR = int(os.getenv("CURFEW_END_HOUR", "5"))
+
+# --- threat model selection -------------------------------------------------
+# "tiered"    — the 7-component sector/time/kinematics/class/direction/loiter/
+#               group score in intelligence/threat_score.py (default; unchanged)
+# "kinematic" — the continuous predictive model in intelligence/kinematic_score.py
+# Both emit a 0-100 score on the same Green/Yellow/Red boundaries, so alerting,
+# the incident DB and the dashboard work identically either way.
+SCORING_MODEL = os.getenv("SCORING_MODEL", "tiered").strip().lower()
+
+# --- predictive kinematic model ---------------------------------------------
+#   S = (alpha*exp(-lambda*d) + beta*max(0, 1/(TTB+eps)) + gamma*ln(1+L_t))
+#       * W_class * C_det
+# Budget, so the 0-100 scale stays legible: proximity 45 at the line, TTB up to
+# 25 at the moment of breach, loiter ~28 after five minutes. A vehicle at the
+# line with a short TTB therefore saturates, while a confident person merely
+# nearby lands mid-yellow.
+KINEMATIC_ALPHA = float(os.getenv("KINEMATIC_ALPHA", "45"))
+# Decay per pixel. 0.010 puts the half-way point near 69px and ~2 points left at
+# 300px. Retune per camera: pixels-per-metre depends on lens and mounting, so a
+# wide field of view wants a smaller lambda.
+KINEMATIC_LAMBDA = float(os.getenv("KINEMATIC_LAMBDA", "0.010"))
+KINEMATIC_BETA = float(os.getenv("KINEMATIC_BETA", "25"))
+KINEMATIC_GAMMA = float(os.getenv("KINEMATIC_GAMMA", "5"))
+# Guards the division and caps the TTB term at beta/epsilon as TTB -> 0.
+KINEMATIC_EPSILON = float(os.getenv("KINEMATIC_EPSILON", "1.0"))
+# W_class. Animals are damped hard for the same reason the tiered model exempts
+# them from the crossing override: livestock cross constantly, and a system that
+# screams at every cow gets switched off.
+KINEMATIC_W_VEHICLE = float(os.getenv("KINEMATIC_W_VEHICLE", "1.5"))
+KINEMATIC_W_PERSON = float(os.getenv("KINEMATIC_W_PERSON", "1.0"))
+KINEMATIC_W_ANIMAL = float(os.getenv("KINEMATIC_W_ANIMAL", "0.4"))
+# Frame rate assumed when the measured FPS is still cold or implausible; TTB is
+# in seconds, so it needs a px/frame -> px/second conversion.
+KINEMATIC_NOMINAL_FPS = float(os.getenv("KINEMATIC_NOMINAL_FPS", "20"))
 
 # Seconds between repeat alerts for the same track at the same tier
 ALERT_COOLDOWN_SECONDS = float(os.getenv("ALERT_COOLDOWN_SECONDS", "8"))

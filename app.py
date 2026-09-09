@@ -70,6 +70,7 @@ from intelligence.loiter import LoiterTracker
 from intelligence.threat_rules import ThreatRulesDB
 from intelligence.threat_score import ThreatScore, ThreatScorer
 from preprocessing.enhance import Preprocessor
+from profiling.stage_profiler import StageProfiler
 from reid.embedder import OSNetEmbedder
 from reid.reid import PersonGallery
 from tracking.tracker import Tracker
@@ -263,6 +264,12 @@ def main() -> None:
     # a zero/negative setting turning the floor into a division error.
     idle_min_period = 1.0 / IDLE_MIN_FPS if IDLE_MIN_FPS > 0 else 0.0
 
+    # Inert unless IBVAP_PROFILE=1 — stage() then returns a shared no-op, so an
+    # unprofiled run does the same work it always did.
+    profiler = StageProfiler()
+    if profiler.enabled:
+        log.info("Stage profiling ENABLED — report prints on exit (q)")
+
     frame_buffers = {name: deque(maxlen=3) for name in CAMERA_SOURCES}
     last_frame_time = {name: None for name in CAMERA_SOURCES}
     fps_ema = {name: 0.0 for name in CAMERA_SOURCES}
@@ -278,7 +285,8 @@ def main() -> None:
                 if frame is None:
                     continue
 
-                active, motion_score = gates[name].is_active(frame)
+                with profiler.stage("activity_gate"):
+                    active, motion_score = gates[name].is_active(frame)
                 frame_counters[name] += 1
 
                 # High activity: run the full pipeline every frame.
@@ -300,10 +308,13 @@ def main() -> None:
                 last_frame_time[name] = now
 
                 preprocessor = preprocessors[name]
-                processed = preprocessor.process(frame)
+                with profiler.stage("preprocess"):
+                    processed = preprocessor.process(frame)
 
-                detections = trackers[name].track(processed)
-                detections = false_alarm_filters[name].filter(detections)
+                with profiler.stage("detect_track"):
+                    detections = trackers[name].track(processed)
+                with profiler.stage("false_alarm_filter"):
+                    detections = false_alarm_filters[name].filter(detections)
                 for det in detections:
                     if det.track_id is not None and det.category() == "person":
                         track_id = det.track_id
@@ -317,17 +328,20 @@ def main() -> None:
                         already_resolved = person_id_cache[name].get(track_id) is not None
                         due_for_check = frame_counters[name] % REID_FACE_CHECK_INTERVAL == 0
                         if not already_resolved or due_for_check:
-                            det.person_id = person_gallery.resolve(
-                                (name, track_id), processed, det.box
-                            )
+                            with profiler.stage("reid_resolve"):
+                                det.person_id = person_gallery.resolve(
+                                    (name, track_id), processed, det.box
+                                )
                             person_id_cache[name][track_id] = det.person_id
                         else:
                             det.person_id = person_id_cache[name][track_id]
 
                         if not already_resolved or due_for_check:
-                            _face_box, embedding = face_recognizer.embed(processed, det.box)
+                            with profiler.stage("face_embed"):
+                                _face_box, embedding = face_recognizer.embed(processed, det.box)
                             if embedding is not None:
-                                match_name, similarity = watchlist_matcher.match(embedding)
+                                with profiler.stage("watchlist_match"):
+                                    match_name, similarity = watchlist_matcher.match(embedding)
                                 watchlist_cache[name][track_id] = (match_name, similarity)
                         cached_match, cached_similarity = watchlist_cache[name].get(
                             track_id, (None, 0.0)
@@ -337,7 +351,8 @@ def main() -> None:
 
                     x1, y1, x2, y2 = det.box
                     ground_point = ((x1 + x2) // 2, y2)
-                    zone_result = zone_engines[name].classify(ground_point, det.direction)
+                    with profiler.stage("zone_classify"):
+                        zone_result = zone_engines[name].classify(ground_point, det.direction)
                     det.zone_tier = zone_result["tier"]
                     det.zone_direction = zone_result["direction"]
 
@@ -360,15 +375,20 @@ def main() -> None:
                         )
                     )
 
-                draw_debug_overlay(processed, preprocessor, active, motion_score)
-                draw_fps_overlay(processed, fps_ema[name])
-                zone_drawers[name].draw_overlay(processed)
+                with profiler.stage("draw_overlays"):
+                    draw_debug_overlay(processed, preprocessor, active, motion_score)
+                    draw_fps_overlay(processed, fps_ema[name])
+                    zone_drawers[name].draw_overlay(processed)
 
-                frame_buffers[name].append(processed.copy())
-                for det, score in zip(detections, scores):
-                    alert_manager.handle(det, score, list(frame_buffers[name]))
+                with profiler.stage("frame_buffer_copy"):
+                    frame_buffers[name].append(processed.copy())
+                with profiler.stage("alert_handle"):
+                    for det, score in zip(detections, scores):
+                        alert_manager.handle(det, score, list(frame_buffers[name]))
 
-                cv2.imshow(window_names[name], processed)
+                with profiler.stage("display"):
+                    cv2.imshow(window_names[name], processed)
+                profiler.frame_done()
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
@@ -376,6 +396,9 @@ def main() -> None:
             for drawer in zone_drawers.values():
                 drawer.handle_key(key)
     finally:
+        report = profiler.report()
+        if report:
+            print(report)
         manager.stop_all()
         threat_rules.close()
         incident_store.close()

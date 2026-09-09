@@ -148,7 +148,7 @@ class ThreatScorer:
         return f"{category} crossing the border line ({zone_direction})"
 
     def _kinematics_risk(self, speed: float) -> float:
-        """U-curve: both near-stationary and running score high, an ordinary
+        r"""U-curve: both near-stationary and running score high, an ordinary
         walking pace scores lowest.
 
             risk
