@@ -1,10 +1,21 @@
 import logging
 import time
 
-from ultralytics import YOLO
+from config.offline import configure_ultralytics_offline
 
-from detection.detector import RELEVANT_CLASS_IDS, Detection
-from tracking.history import TrackHistory
+# Same ordering requirement as detection/detector.py: this module imports
+# ultralytics directly, so it must disable the probe itself rather than rely
+# on whichever module happened to be imported first.
+configure_ultralytics_offline()
+
+from ultralytics import YOLO  # noqa: E402
+
+from detection.detector import (  # noqa: E402
+    RELEVANT_CLASS_IDS,
+    Detection,
+    force_cpu_only_onnx_providers,
+)
+from tracking.history import TrackHistory  # noqa: E402
 
 log = logging.getLogger("ibvap.tracking")
 
@@ -28,6 +39,9 @@ class Tracker:
         history_ttl_seconds: float = 30.0,
         now_fn=time.time,
     ):
+        # Air-gapped requirement: the ONNX session must not register a remote
+        # execution provider. Must run before YOLO builds its backend.
+        force_cpu_only_onnx_providers()
         log.info("Loading YOLO model for tracking: %s", model_path)
         self._model = YOLO(model_path)
         self.confidence = confidence

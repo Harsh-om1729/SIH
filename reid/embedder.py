@@ -1,4 +1,5 @@
 import logging
+import os
 
 import cv2
 import numpy as np
@@ -6,6 +7,27 @@ import torch
 from torchvision.models import ResNet18_Weights, resnet18
 
 log = logging.getLogger("ibvap.reid")
+
+
+def resnet18_weights_available() -> tuple[bool, str]:
+    """Whether the ImageNet ResNet-18 weights are already in the torch cache.
+
+    `resnet18(weights=ResNet18_Weights.DEFAULT)` fetches the checkpoint from
+    download.pytorch.org when the cache is cold. That download is exactly what
+    must not happen on an air-gapped host at startup, so the cache file is
+    checked directly instead of being discovered by a failed request. No
+    network call is made here.
+
+    Provision offline by copying the .pth into the reported path.
+    """
+    url = ResNet18_Weights.DEFAULT.url
+    cache_path = os.path.join(torch.hub.get_dir(), "checkpoints", os.path.basename(url))
+    if os.path.exists(cache_path):
+        return True, f"ResNet-18 weights cached at {cache_path}"
+    return False, (
+        f"ResNet-18 weights not cached at {cache_path}; Re-ID disabled "
+        "(no download attempted)"
+    )
 
 _IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
 _IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)

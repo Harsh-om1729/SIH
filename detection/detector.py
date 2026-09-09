@@ -1,8 +1,63 @@
 import logging
 
-from ultralytics import YOLO
+from config.offline import configure_ultralytics_offline
+
+# Ultralytics evaluates ONLINE = is_online() at import time, opening a TCP
+# probe to public DNS. This must run before that import, not after it.
+configure_ultralytics_offline()
+
+import onnxruntime  # noqa: E402
+from ultralytics import YOLO  # noqa: E402
 
 log = logging.getLogger("ibvap.detection")
+
+CPU_EXECUTION_PROVIDER = "CPUExecutionProvider"
+# The provider list as ONNX Runtime actually reports it, captured once at
+# import before any pinning, so diagnostics can still print the truth.
+ONNX_PROVIDERS_AVAILABLE = tuple(onnxruntime.get_available_providers())
+_providers_pinned = False
+
+
+def force_cpu_only_onnx_providers() -> list[str]:
+    """Pin every ONNX Runtime session in this process to CPU execution.
+
+    Ultralytics' AutoBackend builds its session with
+    `onnxruntime.get_available_providers()` verbatim. On a stock Windows
+    `onnxruntime` wheel that list is
+    `['AzureExecutionProvider', 'CPUExecutionProvider']`, so the session is
+    created with a provider that dispatches to a remote Azure endpoint sitting
+    ahead of CPU. IBVAP is specified to run air-gapped: no remote execution
+    provider may be registered on a session at all, independently of whether it
+    happens to claim any nodes for the current graph.
+
+    Ultralytics exposes no provider argument and builds the session lazily on
+    first inference, so the narrowest hook available is to constrain what
+    `get_available_providers()` reports for the remainder of the process. That
+    permanence is intentional - it is the same requirement for every model
+    loaded here, not just the detector.
+
+    Idempotent. Raises RuntimeError rather than falling back to a remote
+    provider if this ONNX Runtime build has no CPU provider.
+    """
+    global _providers_pinned
+    if _providers_pinned:
+        return [CPU_EXECUTION_PROVIDER]
+    if CPU_EXECUTION_PROVIDER not in ONNX_PROVIDERS_AVAILABLE:
+        raise RuntimeError(
+            f"{CPU_EXECUTION_PROVIDER} is not available in this ONNX Runtime build "
+            f"(available: {list(ONNX_PROVIDERS_AVAILABLE)}); refusing to fall back to "
+            "a remote execution provider on an air-gapped system"
+        )
+    excluded = [p for p in ONNX_PROVIDERS_AVAILABLE if p != CPU_EXECUTION_PROVIDER]
+    if excluded:
+        log.info(
+            "Pinning ONNX Runtime to %s; excluding %s (air-gapped deployment)",
+            CPU_EXECUTION_PROVIDER,
+            excluded,
+        )
+    onnxruntime.get_available_providers = lambda: [CPU_EXECUTION_PROVIDER]
+    _providers_pinned = True
+    return [CPU_EXECUTION_PROVIDER]
 
 # COCO class ids relevant to border surveillance (person / vehicle / animal)
 PERSON_CLASS_IDS = {0}
@@ -53,6 +108,7 @@ class Detector:
     """Wraps a YOLOv8 model, filtered down to person/vehicle/animal classes."""
 
     def __init__(self, model_path: str = "models/yolov8n.onnx", confidence: float = 0.4):
+        force_cpu_only_onnx_providers()
         log.info("Loading YOLO model: %s", model_path)
         self._model = YOLO(model_path)
         self.confidence = confidence

@@ -12,3 +12,4 @@ database/evidence.key
 database/transfer.key
 database/watchlist.key
 transfer_bundle.enc
+benchmark_out/

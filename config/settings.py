@@ -60,6 +60,11 @@ ALERT_COOLDOWN_SECONDS = float(os.getenv("ALERT_COOLDOWN_SECONDS", "8"))
 # Bounded queue for off-thread alert side effects (webhook + evidence).
 ALERT_DISPATCH_QUEUE_SIZE = int(os.getenv("ALERT_DISPATCH_QUEUE_SIZE", "64"))
 
+# Phase 1 runtime instrumentation (metrics/collector.py). Bounded and
+# thread-free; ~3us per stage timing. Off => NullCollector, zero overhead.
+METRICS_ENABLED = os.getenv("METRICS_ENABLED", "1").lower() not in ("0", "false", "no")
+METRICS_REPORT_INTERVAL_S = float(os.getenv("METRICS_REPORT_INTERVAL_S", "30"))
+
 # Cosine similarity (0-1) above which a face is treated as a watchlist match
 WATCHLIST_SIMILARITY_THRESHOLD = float(os.getenv("WATCHLIST_SIMILARITY_THRESHOLD", "0.5"))
 

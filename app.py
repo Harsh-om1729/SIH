@@ -10,6 +10,8 @@ from alerts.alert_manager import AlertManager
 from alerts.dispatch import AlertDispatcher
 from camera.health import CameraErrorIsolator, CameraHealth
 from camera.stream_manager import StreamManager
+from capabilities import CapabilityRegistry
+from metrics import MetricsCollector, NullCollector, ResourceSampler
 from config.settings import (
     ALERT_COOLDOWN_SECONDS,
     ALERT_DISPATCH_QUEUE_SIZE,
@@ -22,6 +24,8 @@ from config.settings import (
     DETECTION_CONFIDENCE,
     DETECTION_MODEL_PATH,
     LOW_FPS_INTERVAL,
+    METRICS_ENABLED,
+    METRICS_REPORT_INTERVAL_S,
     MOTION_THRESHOLD,
     REID_SIMILARITY_THRESHOLD,
     REID_TTL_SECONDS,
@@ -33,7 +37,7 @@ from config.settings import (
 )
 from database.incident_store import IncidentStore
 from detection.draw import draw_detections
-from face.face_recognizer import FaceRecognizer
+from face.face_recognizer import FaceRecognizer, buffalo_weights_available
 from face.watchlist import WatchlistDB, WatchlistMatcher
 from filtering.false_alarm import FalseAlarmFilter
 from integration.syslog_notifier import SyslogNotifier
@@ -41,7 +45,7 @@ from integration.webhook import WebhookNotifier
 from intelligence.threat_rules import ThreatRulesDB
 from intelligence.threat_score import ThreatScorer
 from preprocessing.enhance import Preprocessor
-from reid.embedder import ResNetEmbedder
+from reid.embedder import ResNetEmbedder, resnet18_weights_available
 from reid.reid import PersonGallery
 from tracking.tracker import Tracker
 from zones.drawer import ZoneDrawer
@@ -100,6 +104,34 @@ def draw_threat_score_overlay(frame, det, scorer: ThreatScorer):
     return score
 
 
+def _log_metrics(metrics, resources, manager, capabilities=None) -> None:
+    """Periodic observability line: per-stage p50/p95, counters, resources.
+
+    Emitted from the loop that already runs, so nothing here is sampled on a
+    background thread. Contains only stage names, camera names and numbers -
+    never frames, source URLs or credentials.
+    """
+    snapshot = metrics.snapshot()
+    parts = []
+    for label in sorted(snapshot["stages"]):
+        stats = snapshot["stages"][label]
+        if stats.get("count"):
+            parts.append(f"{label} p50={stats['p50_ms']:.1f}ms p95={stats['p95_ms']:.1f}ms")
+    log.info("METRICS stages: %s", " | ".join(parts) if parts else "(none yet)")
+    log.info("METRICS counters: %s health: %s", snapshot["counters"], manager.health())
+    if capabilities is not None:
+        log.info(
+            "METRICS capabilities: %s failures: %s",
+            capabilities.summary(), capabilities.failures(),
+        )
+    sample = resources.sample()
+    if sample.get("available"):
+        log.info(
+            "METRICS process: rss=%.1fMB cpu=%.1f%% threads=%d uptime=%.0fs",
+            sample["rss_mb"], sample["cpu_percent"], sample["threads"], snapshot["uptime_s"],
+        )
+
+
 def main() -> None:
     log.info("IBVAP starting up (Phase 16 — Command & Control Integration)")
 
@@ -120,14 +152,25 @@ def main() -> None:
         for name in CAMERA_SOURCES
     }
     false_alarm_filters = {name: FalseAlarmFilter() for name in CAMERA_SOURCES}
-    embedder = ResNetEmbedder()
+    # Optional intelligence capabilities. Each is gated behind a local
+    # weight-availability precheck so a cold cache disables the capability
+    # instead of triggering a download, and so a missing optional model can
+    # never stop core perception from starting. See capabilities.py.
+    capabilities = CapabilityRegistry()
+    embedder = capabilities.load(
+        "reid_embedding", ResNetEmbedder, precheck=resnet18_weights_available
+    )
     # One shared gallery across all cameras (Phase 15: cross-camera Re-ID) —
     # resolve() is called with a (camera_name, track_id) key, not a raw
     # track_id, so two cameras can't collide on the same track_id number.
-    person_gallery = PersonGallery(
-        embed_fn=embedder.embed,
-        similarity_threshold=REID_SIMILARITY_THRESHOLD,
-        ttl_seconds=REID_TTL_SECONDS,
+    person_gallery = (
+        PersonGallery(
+            embed_fn=embedder.embed,
+            similarity_threshold=REID_SIMILARITY_THRESHOLD,
+            ttl_seconds=REID_TTL_SECONDS,
+        )
+        if embedder is not None
+        else None
     )
     zone_engines = {
         name: ZoneEngine(
@@ -140,9 +183,19 @@ def main() -> None:
     zone_drawers = {
         name: ZoneDrawer(window_names[name], zone_engines[name]) for name in CAMERA_SOURCES
     }
-    face_recognizer = FaceRecognizer()
-    watchlist_db = WatchlistDB()
-    watchlist_matcher = WatchlistMatcher(watchlist_db, similarity_threshold=WATCHLIST_SIMILARITY_THRESHOLD)
+    face_recognizer = capabilities.load(
+        "face_recognition", FaceRecognizer, precheck=buffalo_weights_available
+    )
+    # The watchlist store is local SQLite and needs no weights, but it can
+    # still fail on an unreadable key or disk, and that must not stop core
+    # perception either. Watchlist matching is meaningless without face
+    # embeddings, so it stays off when face recognition is unavailable.
+    watchlist_db = capabilities.load("watchlist", WatchlistDB)
+    watchlist_matcher = (
+        WatchlistMatcher(watchlist_db, similarity_threshold=WATCHLIST_SIMILARITY_THRESHOLD)
+        if watchlist_db is not None
+        else None
+    )
     threat_rules = ThreatRulesDB()
     threat_scorer = ThreatScorer(threat_rules)
     incident_store = IncidentStore()
@@ -163,6 +216,19 @@ def main() -> None:
     fps_ema = {name: 0.0 for name in CAMERA_SOURCES}
     isolator = CameraErrorIsolator()
     last_health: dict[str, str] = {}
+    # Phase 1 instrumentation. Bounded rings, no background thread; ~3us per
+    # stage timing against a ~60ms detection stage, so it does not materially
+    # alter pipeline behaviour. NullCollector removes even that when disabled.
+    metrics = MetricsCollector() if METRICS_ENABLED else NullCollector()
+    resources = ResourceSampler(min_interval_s=METRICS_REPORT_INTERVAL_S)
+    last_metrics_report = time.perf_counter()
+
+    # Say up front what the operator is actually running with, rather than
+    # leaving a disabled capability to be inferred from absent overlays.
+    log.info("Optional capability states at startup: %s", capabilities.summary())
+    for cap_name, entry in sorted(capabilities.states().items()):
+        if entry["state"] != "available":
+            log.warning("  %s: %s — %s", cap_name, entry["state"].upper(), entry["detail"])
 
     def process_camera_frame(name: str, frame) -> None:
         """The full per-camera pipeline for one frame.
@@ -170,7 +236,8 @@ def main() -> None:
         Runs behind `isolator` below, so anything raised in here costs this
         one frame on this one camera instead of the whole loop.
         """
-        active, motion_score = gates[name].is_active(frame)
+        with metrics.stage(name, "activity_gate"):
+            active, motion_score = gates[name].is_active(frame)
         frame_counters[name] += 1
 
         # High activity: run the full pipeline every frame.
@@ -186,41 +253,68 @@ def main() -> None:
         last_frame_time[name] = now
 
         preprocessor = preprocessors[name]
-        processed = preprocessor.process(frame)
+        with metrics.stage(name, "preprocess"):
+            processed = preprocessor.process(frame)
 
-        detections = trackers[name].track(processed)
-        detections = false_alarm_filters[name].filter(detections)
+        with metrics.stage(name, "detect_track"):
+            detections = trackers[name].track(processed)
+        with metrics.stage(name, "false_alarm_filter"):
+            detections = false_alarm_filters[name].filter(detections)
+        metrics.increment("detections_kept", len(detections))
         for det in detections:
-            if det.track_id is not None and det.category() == "person":
-                det.person_id = person_gallery.resolve(
-                    (name, det.track_id), processed, det.box
-                )
+            if (
+                person_gallery is not None
+                and det.track_id is not None
+                and det.category() == "person"
+            ):
+                # A failing optional model degrades itself and leaves the
+                # detection unenriched; it does not cost the frame.
+                with metrics.stage(name, "reid"):
+                    det.person_id = capabilities.call(
+                        "reid_embedding",
+                        person_gallery.resolve,
+                        (name, det.track_id), processed, det.box,
+                    )
             x1, y1, x2, y2 = det.box
             ground_point = ((x1 + x2) // 2, y2)
             zone_result = zone_engines[name].classify(ground_point, det.direction)
             det.zone_tier = zone_result["tier"]
             det.zone_direction = zone_result["direction"]
 
-            if det.category() == "person":
-                _face_box, embedding = face_recognizer.embed(processed, det.box)
-                if embedding is not None:
-                    match_name, similarity = watchlist_matcher.match(embedding)
+            if face_recognizer is not None and det.category() == "person":
+                with metrics.stage(name, "face_embed"):
+                    _face_box, embedding = capabilities.call(
+                        "face_recognition",
+                        face_recognizer.embed,
+                        processed, det.box,
+                        default=(None, None),
+                    )
+                if embedding is not None and watchlist_matcher is not None:
+                    with metrics.stage(name, "watchlist_match"):
+                        match_name, similarity = capabilities.call(
+                            "watchlist",
+                            watchlist_matcher.match,
+                            embedding,
+                            default=(None, 0.0),
+                        )
                     det.watchlist_match = match_name
                     det.watchlist_similarity = similarity
 
         draw_detections(processed, detections)
 
-        scores = [
-            draw_threat_score_overlay(processed, det, threat_scorer) for det in detections
-        ]
+        with metrics.stage(name, "threat_score"):
+            scores = [
+                draw_threat_score_overlay(processed, det, threat_scorer) for det in detections
+            ]
 
         draw_debug_overlay(processed, preprocessor, active, motion_score)
         draw_fps_overlay(processed, fps_ema[name])
         zone_drawers[name].draw_overlay(processed)
 
         frame_buffers[name].append(processed.copy())
-        for det, score in zip(detections, scores):
-            alert_manager.handle(det, score, list(frame_buffers[name]))
+        with metrics.stage(name, "alert_handle"):
+            for det, score in zip(detections, scores):
+                alert_manager.handle(det, score, list(frame_buffers[name]))
 
         cv2.imshow(window_names[name], processed)
 
@@ -231,8 +325,10 @@ def main() -> None:
                 degraded = {n: s for n, s in health.items() if s != CameraHealth.ONLINE}
                 if degraded:
                     log.warning("Camera health changed — degraded: %s (all: %s)", degraded, health)
+                    metrics.increment("health_degraded_transitions")
                 else:
                     log.info("Camera health changed — all cameras ONLINE")
+                    metrics.increment("health_recovered_transitions")
                 last_health = health
 
             frames = manager.read_all()
@@ -242,9 +338,18 @@ def main() -> None:
                 # Per-camera failure boundary: a pipeline exception on one
                 # camera drops that frame, is logged with the camera id and a
                 # traceback, and leaves every other camera still processing.
-                isolator.run(
+                if not isolator.run(
                     name, process_camera_frame, name, frame, stage="frame-pipeline"
-                )
+                ):
+                    metrics.increment("frame_pipeline_failures")
+                else:
+                    metrics.increment("frames_processed")
+
+            if METRICS_ENABLED:
+                now_report = time.perf_counter()
+                if now_report - last_metrics_report >= METRICS_REPORT_INTERVAL_S:
+                    last_metrics_report = now_report
+                    _log_metrics(metrics, resources, manager, capabilities)
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):

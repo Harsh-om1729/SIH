@@ -1,9 +1,45 @@
+import glob
 import logging
+import os
 
 import numpy as np
 from insightface.app import FaceAnalysis
 
 log = logging.getLogger("ibvap.face")
+
+# The pack and cache root FaceRecognizer loads. Kept as module constants so
+# the availability precheck below cannot drift from what is actually loaded.
+INSIGHTFACE_PACK = "buffalo_s"
+INSIGHTFACE_ROOT = "~/.insightface"
+
+
+def buffalo_weights_available(
+    pack: str = INSIGHTFACE_PACK, root: str = INSIGHTFACE_ROOT
+) -> tuple[bool, str]:
+    """Whether the InsightFace pack is already provisioned locally.
+
+    `FaceAnalysis.__init__` calls `insightface.utils.ensure_available`, which
+    downloads the pack zip from GitHub whenever its directory is absent. On an
+    air-gapped deployment that download cannot succeed, and attempting it at
+    startup is the exact behaviour being prevented - so the directory is
+    checked directly rather than discovered through a failed request. No
+    network call is made here.
+
+    Provision offline by extracting the pack into the reported directory.
+    """
+    model_dir = os.path.join(os.path.expanduser(root), "models", pack)
+    if not os.path.isdir(model_dir):
+        return False, (
+            f"InsightFace pack '{pack}' is not provisioned at {model_dir}; "
+            "face recognition disabled (no download attempted)"
+        )
+    onnx_files = glob.glob(os.path.join(model_dir, "*.onnx"))
+    if not onnx_files:
+        return False, (
+            f"InsightFace pack directory {model_dir} exists but contains no "
+            ".onnx model files; face recognition disabled"
+        )
+    return True, f"{len(onnx_files)} model file(s) provisioned at {model_dir}"
 
 
 def cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
@@ -23,7 +59,11 @@ class FaceRecognizer:
 
     def __init__(self, det_size: tuple = (320, 320)):
         log.info("Loading InsightFace buffalo_s for face recognition")
-        self._app = FaceAnalysis(name="buffalo_s", providers=["CPUExecutionProvider"])
+        self._app = FaceAnalysis(
+            name=INSIGHTFACE_PACK,
+            root=INSIGHTFACE_ROOT,
+            providers=["CPUExecutionProvider"],
+        )
         self._app.prepare(ctx_id=0, det_size=det_size)
 
     def embed(self, frame, person_box: tuple):
