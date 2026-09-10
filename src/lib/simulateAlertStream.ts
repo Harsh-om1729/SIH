@@ -54,27 +54,24 @@ export function generateSimulatedIncident(overrideTier?: 'green' | 'yellow' | 'r
 
   let totalScore = Number((sectorRisk + timeRisk + kinematicsRisk + classConfidence).toFixed(1));
 
-  // Watchlist match on some red alerts
-  let watchlistMatch: string | null = null;
-  let personId: number | null = null;
-  if (tier === 'red' && Math.random() > 0.4) {
-    const names = ['TARIQ AHMED', 'VIKRAM SINGH', 'BILAL HUSSAIN', 'RASHID MALIK'];
-    watchlistMatch = names[Math.floor(Math.random() * names.length)];
-    personId = 100 + Math.floor(Math.random() * 200);
-    // Per app.py draw_threat_score_overlay: watchlist match overrides to red and total >= 70
+  // No person names - pure target detection
+  const watchlistMatch: string | null = null;
+  const personId: number | null = null;
+  if (tier === 'red') {
     totalScore = Math.max(totalScore, 70.0);
   }
 
   // Tactical SVG snapshot with Fernet encryption badge
   const tierColor = tier === 'red' ? '#e5484d' : tier === 'yellow' ? '#e6c34a' : '#4fbf7a';
+  const categoryLabel = category === 'person' ? 'PERSON DETECT' : category === 'vehicle' ? 'VEHICLE DETECT' : 'UNKNOWN DETECT';
   const svg = `
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" width="640" height="360">
       <rect width="640" height="360" fill="#0a0f0d"/>
       <rect x="220" y="90" width="200" height="180" fill="${tierColor}" fill-opacity="0.1" stroke="${tierColor}" stroke-width="2"/>
-      <text x="20" y="30" fill="#e6ece9" font-family="monospace" font-size="12">LIVE ALERT CAPTURE: ${camera.toUpperCase()}</text>
-      <text x="20" y="50" fill="${tierColor}" font-family="monospace" font-size="11">TIER: ${tier.toUpperCase()} · SCORE: ${totalScore} [S:${sectorRisk} T:${timeRisk} K:${kinematicsRisk} C:${classConfidence}]</text>
+      <text x="20" y="30" fill="#e6ece9" font-family="monospace" font-size="12">LIVE TARGET CAPTURE: ${camera.toUpperCase()}</text>
+      <text x="20" y="50" fill="${tierColor}" font-family="monospace" font-size="11">TYPE: ${categoryLabel} · SCORE: ${totalScore} [S:${sectorRisk} T:${timeRisk} K:${kinematicsRisk} C:${classConfidence}]</text>
       <text x="20" y="68" fill="#5c6f68" font-family="monospace" font-size="10">STORAGE: FERNET-AES128-CBC ENCRYPTED (database/incidents.db)</text>
-      ${watchlistMatch ? `<text x="20" y="86" fill="#e5484d" font-family="monospace" font-size="11">⚠ WATCHLIST MATCH: ${watchlistMatch} (ThreatRulesDB Override)</text>` : ''}
+      <text x="20" y="86" fill="${tierColor}" font-family="monospace" font-size="11">CLASSIFICATION: ${categoryLabel} // SECTOR THREAT</text>
     </svg>
   `.trim();
 

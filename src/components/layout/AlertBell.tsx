@@ -3,8 +3,8 @@ import { useNavigate } from 'react-router-dom';
 import { useAlerts } from '@/components/alerts/AlertProvider';
 import {
   Bell,
+  BellOff,
   CheckCheck,
-  ShieldAlert,
   Radio,
   ExternalLink,
   User,
@@ -17,7 +17,15 @@ import { Button } from '@/components/ui/Button';
 
 export const AlertBell: React.FC = () => {
   const [isOpen, setIsOpen] = useState(false);
-  const { alerts, unreadCount, markAllAsRead, acknowledgeAlert, triggerDemoAlert } = useAlerts();
+  const {
+    alerts,
+    unreadCount,
+    markAllAsRead,
+    acknowledgeAlert,
+    triggerDemoAlert,
+    popupsMuted,
+    toggleMutePopups,
+  } = useAlerts();
   const dropdownRef = useRef<HTMLDivElement>(null);
   const navigate = useNavigate();
 
@@ -59,33 +67,30 @@ export const AlertBell: React.FC = () => {
       <button
         onClick={() => setIsOpen((prev) => !prev)}
         aria-label="Open notifications center"
-        className={`relative p-2 rounded-sm text-text-dim hover:text-text-primary hover:bg-bg-elevated transition-colors border ${
+        className={`relative p-2 rounded-xl text-text-dim hover:text-white hover:bg-white/[0.08] transition-colors border ${
           isOpen
-            ? 'bg-bg-elevated text-text-primary border-border'
+            ? 'bg-white/[0.08] text-white border-white/20'
             : 'border-transparent'
         }`}
       >
         <Bell className="w-4 h-4" />
 
-        {/* Pulsing indicator & Badge when unread > 0 */}
+        {/* Indicator & Badge when unread > 0 */}
         {unreadCount > 0 && (
-          <>
-            <span className="absolute -top-1 -right-1 flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-accent-red text-white text-[10px] font-mono font-bold shadow-md">
-              {unreadCount > 9 ? '9+' : unreadCount}
-            </span>
-            <span className="absolute -top-1 -right-1 flex h-4 w-4 rounded-full bg-accent-red/50 animate-ping pointer-events-none" />
-          </>
+          <span className="absolute -top-1 -right-1 flex h-4 min-w-4 px-1 items-center justify-center rounded-full bg-accent-red text-white text-[10px] font-mono font-bold shadow-md">
+            {unreadCount > 9 ? '9+' : unreadCount}
+          </span>
         )}
       </button>
 
       {/* Dropdown Panel */}
       {isOpen && (
-        <div className="absolute right-0 mt-2 w-80 sm:w-96 rounded-md bg-[#111917] border border-border-subtle shadow-2xl z-50 overflow-hidden animate-fadeIn">
+        <div className="absolute right-0 mt-2 w-80 sm:w-96 rounded-2xl bg-[#090c12] border border-white/10 shadow-2xl z-50 overflow-hidden backdrop-blur-2xl">
           {/* Header */}
-          <div className="p-3.5 bg-bg-surface border-b border-border-subtle flex items-center justify-between">
+          <div className="p-3.5 bg-[#07090f] border-b border-white/[0.08] flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <span className="font-mono text-xs font-bold tracking-wider text-text-primary flex items-center gap-1.5">
-                <Radio className="w-3.5 h-3.5 text-accent-teal animate-pulse" />
+              <span className="font-mono text-xs font-bold tracking-wider text-white flex items-center gap-1.5">
+                <Radio className="w-3.5 h-3.5 text-accent-teal" />
                 TACTICAL ALERTS
               </span>
               {unreadCount > 0 && (
@@ -95,20 +100,37 @@ export const AlertBell: React.FC = () => {
               )}
             </div>
 
-            {unreadCount > 0 && (
+
+            <div className="flex items-center gap-2">
+              {/* Mute Popups Quick Option in Notification Center */}
               <button
-                onClick={markAllAsRead}
-                className="flex items-center gap-1 text-[11px] font-mono text-text-dim hover:text-accent-teal transition-colors"
-                title="Mark all alerts as read"
+                onClick={toggleMutePopups}
+                className={`flex items-center gap-1 text-[10px] font-mono px-2 py-0.5 rounded border transition-colors ${
+                  popupsMuted
+                    ? 'bg-accent-yellow/20 text-accent-yellow border-accent-yellow/40'
+                    : 'text-text-dim border-white/10 hover:text-white hover:bg-white/[0.05]'
+                }`}
+                title="Mute on-screen popups"
               >
-                <CheckCheck className="w-3.5 h-3.5" />
-                Clear All
+                <BellOff className="w-3 h-3" />
+                <span>{popupsMuted ? 'Muted' : 'Mute'}</span>
               </button>
-            )}
+
+              {unreadCount > 0 && (
+                <button
+                  onClick={markAllAsRead}
+                  className="flex items-center gap-1 text-[11px] font-mono text-text-dim hover:text-accent-teal transition-colors"
+                  title="Mark all alerts as read"
+                >
+                  <CheckCheck className="w-3.5 h-3.5" />
+                  Clear
+                </button>
+              )}
+            </div>
           </div>
 
           {/* Quick Demo Simulator Bar */}
-          <div className="px-3 py-2 bg-bg-elevated/60 border-b border-border-subtle/70 flex items-center justify-between text-[11px]">
+          <div className="px-3 py-2 bg-white/[0.02] border-b border-white/[0.06] flex items-center justify-between text-[11px]">
             <span className="font-mono text-text-dim flex items-center gap-1">
               <Zap className="w-3 h-3 text-accent-yellow" />
               TEST TRIGGER:
@@ -124,15 +146,15 @@ export const AlertBell: React.FC = () => {
                 onClick={() => triggerDemoAlert('red')}
                 className="px-2 py-0.5 rounded bg-accent-red/15 text-accent-red hover:bg-accent-red/25 border border-accent-red/30 font-mono text-[10px] font-semibold transition-colors"
               >
-                + High Threat
+                + Critical
               </button>
             </div>
           </div>
 
           {/* Alert List */}
-          <div className="max-h-72 overflow-y-auto divide-y divide-border-subtle/40">
+          <div className="max-h-72 overflow-y-auto divide-y divide-white/[0.06]">
             {recentAlerts.length === 0 ? (
-              <div className="p-6 text-center text-text-dim text-xs">
+              <div className="p-6 text-center text-text-dim text-xs font-mono">
                 No telemetry alerts recorded yet.
               </div>
             ) : (
@@ -146,20 +168,20 @@ export const AlertBell: React.FC = () => {
                     onClick={() => {
                       acknowledgeAlert(alert.id);
                       setIsOpen(false);
-                      navigate('/incidents');
+                      navigate(`/live?camera=${alert.cameraName}`);
                     }}
-                    className={`p-3 hover:bg-bg-elevated/70 transition-colors cursor-pointer flex items-start gap-2.5 ${
+                    className={`p-3 hover:bg-white/[0.06] transition-colors cursor-pointer flex items-start gap-2.5 ${
                       isRed ? 'bg-accent-red/5' : ''
                     }`}
                   >
                     {/* Category / Alert Icon */}
                     <div
-                      className={`p-1.5 rounded-sm mt-0.5 shrink-0 ${
+                      className={`p-1.5 rounded-lg mt-0.5 shrink-0 border ${
                         isRed
-                          ? 'bg-accent-red/20 text-accent-red'
+                          ? 'bg-accent-red/20 text-accent-red border-accent-red/30'
                           : isYellow
-                          ? 'bg-accent-yellow/20 text-accent-yellow'
-                          : 'bg-accent-green/20 text-accent-green'
+                          ? 'bg-accent-yellow/20 text-accent-yellow border-accent-yellow/30'
+                          : 'bg-accent-green/20 text-accent-green border-accent-green/30'
                       }`}
                     >
                       {alert.category === 'person' && <User className="w-3.5 h-3.5" />}
@@ -171,33 +193,36 @@ export const AlertBell: React.FC = () => {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-1">
                         <div className="flex items-center gap-1.5">
-                          <span className="font-mono text-xs font-semibold text-text-primary uppercase">
+                          <span className="font-mono text-xs font-bold text-white uppercase">
                             {alert.cameraName}
                           </span>
-                          <Badge
-                            variant={
-                              alert.tier === 'red'
-                                ? 'red'
-                                : alert.tier === 'yellow'
-                                ? 'yellow'
-                                : 'green'
-                            }
-                            size="sm"
+                          <span
+                            className={`px-1.5 py-0.2 rounded font-mono text-[9px] font-bold ${
+                              isRed
+                                ? 'bg-accent-red/20 text-accent-red border border-accent-red/30'
+                                : isYellow
+                                ? 'bg-accent-yellow/20 text-accent-yellow border border-accent-yellow/30'
+                                : 'bg-accent-green/20 text-accent-green border border-accent-green/30'
+                            }`}
                           >
                             {alert.tier.toUpperCase()}
-                          </Badge>
+                          </span>
                         </div>
                         <span className="font-mono text-[10px] text-text-dim shrink-0">
                           {formatTimeAgo(alert.timestamp)}
                         </span>
                       </div>
 
-                      <div className="text-[11px] text-text-dim mt-0.5 flex items-center justify-between">
-                        <span className="capitalize">
-                          {alert.category} · Zone {alert.zoneTier || alert.tier}
+                      <div className="text-[11px] text-text-dim mt-1 flex items-center justify-between">
+                        <span className="font-semibold text-white">
+                          {alert.category === 'person'
+                            ? 'Person Detection'
+                            : alert.category === 'vehicle'
+                            ? 'Vehicle Detection'
+                            : 'Unknown Detection'}
                         </span>
                         <span
-                          className={`font-mono font-medium ${
+                          className={`font-mono font-bold text-[10px] ${
                             isRed
                               ? 'text-accent-red'
                               : isYellow
@@ -205,7 +230,7 @@ export const AlertBell: React.FC = () => {
                               : 'text-text-dim'
                           }`}
                         >
-                          SCORE: {alert.score}
+                          SCORE: {alert.score.toFixed(1)}
                         </span>
                       </div>
 
@@ -215,15 +240,7 @@ export const AlertBell: React.FC = () => {
                           <span>
                             S:{alert.breakdown.sectorRisk} T:{alert.breakdown.timeRisk} K:{alert.breakdown.kinematicsRisk} C:{alert.breakdown.classConfidence}
                           </span>
-                          <span className="text-accent-teal">#{alert.reidGalleryId}</span>
-                        </div>
-                      )}
-
-                      {/* Watchlist match pill */}
-                      {alert.watchlistMatch && (
-                        <div className="mt-1 inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-accent-red/20 border border-accent-red/40 text-accent-red text-[10px] font-mono font-bold">
-                          <ShieldAlert className="w-3 h-3" />
-                          <span>MATCH: {alert.watchlistMatch}</span>
+                          <span className="text-accent-teal font-semibold">#{alert.reidGalleryId}</span>
                         </div>
                       )}
                     </div>
@@ -234,17 +251,17 @@ export const AlertBell: React.FC = () => {
           </div>
 
           {/* Footer */}
-          <div className="p-2.5 bg-bg-surface border-t border-border-subtle flex items-center justify-center">
+          <div className="p-2.5 bg-white/[0.02] border-t border-white/[0.08] flex items-center justify-center">
             <Button
               variant="ghost"
               size="sm"
               onClick={() => {
                 setIsOpen(false);
-                navigate('/incidents');
+                navigate('/detections');
               }}
-              className="w-full text-xs text-text-dim hover:text-accent-teal justify-center"
+              className="w-full text-xs text-text-dim hover:text-accent-teal justify-center font-mono"
             >
-              <span>View All in Evidence Center</span>
+              <span>View All in Detections Feed</span>
               <ExternalLink className="w-3 h-3 ml-1.5" />
             </Button>
           </div>

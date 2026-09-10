@@ -26,9 +26,9 @@ export const Card = React.forwardRef<HTMLDivElement, CardProps>(
     ref
   ) => {
     const variants = {
-      default: 'bg-bg-surface border-border-subtle',
-      elevated: 'bg-bg-elevated border-border-subtle hover:border-text-muted/40 transition-colors',
-      bordered: 'bg-bg-surface border-accent-teal/30',
+      default: 'card-3d rounded-2xl',
+      elevated: 'card-3d rounded-2xl bg-[#0b0e16] border-white/10 shadow-lg',
+      bordered: 'card-3d rounded-2xl border-white/15 shadow-md',
     };
 
     const hasHeader = Boolean(title || subtitle || action);
@@ -37,32 +37,33 @@ export const Card = React.forwardRef<HTMLDivElement, CardProps>(
       <div
         ref={ref}
         className={cn(
-          'rounded-sm border text-text-primary overflow-hidden shadow-none',
+          'text-text-primary overflow-hidden transition-colors duration-100 relative',
           variants[variant],
           className
         )}
         {...props}
       >
         {hasHeader && (
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border-subtle bg-bg-surface/50">
+          <div className="flex items-center justify-between px-5 py-3.5 border-b border-white/[0.06] bg-[#07090f]">
             <div className="space-y-0.5">
               {title && (
-                <div className="font-semibold text-sm tracking-wide text-text-primary">
+                <div className="font-semibold text-sm tracking-tight text-text-primary flex items-center gap-2">
                   {title}
                 </div>
               )}
               {subtitle && (
-                <div className="text-xs text-text-dim">{subtitle}</div>
+                <div className="text-xs text-text-dim leading-relaxed">{subtitle}</div>
               )}
             </div>
             {action && <div className="flex items-center gap-2">{action}</div>}
           </div>
         )}
 
-        <div className={cn('p-4', bodyClassName)}>{children}</div>
+
+        <div className={cn('p-5', bodyClassName)}>{children}</div>
 
         {footer && (
-          <div className="px-4 py-2.5 border-t border-border-subtle bg-bg-surface/30 text-xs text-text-dim flex items-center justify-between">
+          <div className="px-5 py-3.5 border-t border-white/[0.08] bg-black/40 text-xs text-text-dim flex items-center justify-between">
             {footer}
           </div>
         )}

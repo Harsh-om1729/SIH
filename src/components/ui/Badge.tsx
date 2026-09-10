@@ -12,27 +12,28 @@ export const Badge: React.FC<BadgeProps> = ({
   className,
   variant = 'neutral',
   dot = false,
-  pulse = false,
+  pulse: _pulse = false,
   size = 'md',
   children,
   ...props
 }) => {
+
   const baseStyles =
-    'inline-flex items-center font-mono font-medium rounded uppercase tracking-wider select-none border';
+    'inline-flex items-center font-medium rounded-full tracking-wide select-none border backdrop-blur-md';
 
   const variants = {
     green:
-      'bg-accent-green/10 text-accent-green border-accent-green/30 shadow-[0_0_8px_rgba(79,191,122,0.15)]',
+      'bg-accent-green/10 text-accent-green border-accent-green/30',
     yellow:
-      'bg-accent-yellow/10 text-accent-yellow border-accent-yellow/30 shadow-[0_0_8px_rgba(230,195,74,0.15)]',
+      'bg-accent-yellow/10 text-accent-yellow border-accent-yellow/30',
     red:
-      'bg-accent-red/10 text-accent-red border-accent-red/30 shadow-[0_0_8px_rgba(229,72,77,0.2)]',
+      'bg-accent-red/10 text-accent-red border-accent-red/35',
     neutral:
-      'bg-bg-elevated text-text-dim border-border-subtle',
+      'bg-[#0f1422] text-text-dim border-white/10',
     teal:
-      'bg-accent-teal/10 text-accent-teal border-accent-teal/30 shadow-[0_0_8px_rgba(95,214,196,0.15)]',
+      'bg-accent-teal/10 text-accent-teal border-accent-teal/30',
     purple:
-      'bg-accent-purple/10 text-accent-purple border-accent-purple/30 shadow-[0_0_8px_rgba(180,120,255,0.15)]',
+      'bg-accent-purple/10 text-accent-purple border-accent-purple/30',
   };
 
   const dotColors = {
@@ -56,17 +57,9 @@ export const Badge: React.FC<BadgeProps> = ({
     >
       {dot && (
         <span className="relative flex h-1.5 w-1.5">
-          {pulse && (
-            <span
-              className={cn(
-                'animate-ping absolute inline-flex h-full w-full rounded-full opacity-75',
-                dotColors[variant]
-              )}
-            />
-          )}
           <span
             className={cn(
-              'relative inline-flex rounded-full h-1.5 w-1.5',
+              'inline-flex rounded-full h-1.5 w-1.5',
               dotColors[variant]
             )}
           />
@@ -76,3 +69,4 @@ export const Badge: React.FC<BadgeProps> = ({
     </span>
   );
 };
+

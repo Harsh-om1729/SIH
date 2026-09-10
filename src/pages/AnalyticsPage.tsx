@@ -30,42 +30,43 @@ import {
   Moon,
 } from 'lucide-react';
 
+// Custom Tooltip for Recharts declared outside render
+const CustomAnalyticsTooltip = ({ active, payload, label }: any) => {
+  if (active && payload && payload.length) {
+    return (
+      <div className="p-3 bg-bg-surface/95 border border-border-subtle/90 rounded-xl shadow-2xl text-xs space-y-1.5 min-w-[150px] backdrop-blur-md">
+        <div className="text-text-primary font-semibold border-b border-border-subtle/60 pb-1 flex items-center justify-between">
+          <span>{label || payload[0]?.name}</span>
+          <span className="text-[10px] text-text-dim uppercase tracking-wider">Metrics</span>
+        </div>
+        {payload.map((entry: any, index: number) => (
+          <div
+            key={index}
+            className="flex items-center justify-between gap-3 text-xs"
+            style={{ color: entry.color || entry.fill }}
+          >
+            <span className="capitalize">{entry.name || 'Count'}:</span>
+            <span className="font-bold">{entry.value}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return null;
+};
+
 export const AnalyticsPage: React.FC = () => {
   const categoryData = getCategoryDistribution(mockIncidents);
   const cameraData = getCameraDistribution(mockIncidents);
   const tierData = getTierDistribution(mockIncidents);
   const hourlyActivity = getPeakHourlyActivity(mockIncidents);
 
-  // Custom Tooltip for Recharts
-  const CustomAnalyticsTooltip = ({ active, payload, label }: any) => {
-    if (active && payload && payload.length) {
-      return (
-        <div className="p-3 bg-bg-surface border border-border-subtle rounded-sm shadow-xl font-mono text-xs space-y-1 min-w-[140px]">
-          <div className="text-text-primary font-bold border-b border-border-subtle/70 pb-1">
-            {label || payload[0]?.name}
-          </div>
-          {payload.map((entry: any, index: number) => (
-            <div
-              key={index}
-              className="flex items-center justify-between gap-3 text-xs"
-              style={{ color: entry.color || entry.fill }}
-            >
-              <span className="capitalize">{entry.name || 'Count'}:</span>
-              <span className="font-bold">{entry.value}</span>
-            </div>
-          ))}
-        </div>
-      );
-    }
-    return null;
-  };
-
   return (
     <div className="space-y-6">
       {/* Top Header Row */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-border-subtle pb-4">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-white/10 pb-4">
         <div>
-          <h2 className="text-xl font-bold tracking-tight text-text-primary flex items-center gap-2">
+          <h2 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             <BarChart3 className="w-5 h-5 text-accent-teal" />
             <span>Threat Intelligence Analytics</span>
           </h2>
@@ -74,9 +75,9 @@ export const AnalyticsPage: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2 font-mono text-[11px] text-text-dim bg-bg-surface px-3 py-1.5 rounded-sm border border-border-subtle">
+        <div className="flex items-center gap-2 font-mono text-[11px] text-text-dim bg-black/60 px-3.5 py-2 rounded-xl border border-white/10 shadow-inner">
           <Clock className="w-3.5 h-3.5 text-accent-teal" />
-          <span>Data range: Last 24 hours (mock data)</span>
+          <span>Data range: Last 24 hours (tactical simulation)</span>
         </div>
       </div>
 
@@ -108,8 +109,8 @@ export const AnalyticsPage: React.FC = () => {
                   outerRadius={85}
                   paddingAngle={4}
                   dataKey="value"
-                  stroke="#111917"
-                  strokeWidth={2}
+                  stroke="#08080d"
+                  strokeWidth={3}
                 >
                   {categoryData.map((entry, index) => (
                     <Cell key={`cell-${index}`} fill={entry.color} />
@@ -147,17 +148,17 @@ export const AnalyticsPage: React.FC = () => {
                 data={cameraData}
                 margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
               >
-                <CartesianGrid strokeDasharray="3 3" stroke="#25322e" vertical={false} />
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
                 <XAxis
                   dataKey="camera"
-                  stroke="#5c6f68"
-                  tick={{ fill: '#8fa39b', fontSize: 11, fontFamily: 'monospace' }}
-                  axisLine={{ stroke: '#25322e' }}
+                  stroke="rgba(255, 255, 255, 0.15)"
+                  tick={{ fill: '#8b949e', fontSize: 11, fontFamily: 'monospace' }}
+                  axisLine={{ stroke: 'rgba(255, 255, 255, 0.15)' }}
                 />
                 <YAxis
-                  stroke="#5c6f68"
-                  tick={{ fill: '#8fa39b', fontSize: 11, fontFamily: 'monospace' }}
-                  axisLine={{ stroke: '#25322e' }}
+                  stroke="rgba(255, 255, 255, 0.15)"
+                  tick={{ fill: '#8b949e', fontSize: 11, fontFamily: 'monospace' }}
+                  axisLine={{ stroke: 'rgba(255, 255, 255, 0.15)' }}
                   allowDecimals={false}
                 />
                 <Tooltip content={<CustomAnalyticsTooltip />} />
@@ -166,9 +167,9 @@ export const AnalyticsPage: React.FC = () => {
                     <span className="font-mono text-xs text-text-dim capitalize">{value}</span>
                   )}
                 />
-                <Bar dataKey="red" name="Red (Critical)" fill="#e5484d" stackId="a" />
-                <Bar dataKey="yellow" name="Yellow (Caution)" fill="#e6c34a" stackId="a" />
-                <Bar dataKey="green" name="Green (Normal)" fill="#4fbf7a" stackId="a" radius={[3, 3, 0, 0]} />
+                <Bar dataKey="red" name="Red (Critical)" fill="#ff0055" stackId="a" />
+                <Bar dataKey="yellow" name="Yellow (Caution)" fill="#ffaa00" stackId="a" />
+                <Bar dataKey="green" name="Green (Normal)" fill="#00ff88" stackId="a" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </div>
@@ -195,21 +196,21 @@ export const AnalyticsPage: React.FC = () => {
                 data={tierData}
                 margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
               >
-                <CartesianGrid strokeDasharray="3 3" stroke="#25322e" vertical={false} />
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
                 <XAxis
                   dataKey="tier"
-                  stroke="#5c6f68"
-                  tick={{ fill: '#8fa39b', fontSize: 10, fontFamily: 'Inter' }}
-                  axisLine={{ stroke: '#25322e' }}
+                  stroke="rgba(255, 255, 255, 0.15)"
+                  tick={{ fill: '#8b949e', fontSize: 10, fontFamily: 'Inter' }}
+                  axisLine={{ stroke: 'rgba(255, 255, 255, 0.15)' }}
                 />
                 <YAxis
-                  stroke="#5c6f68"
-                  tick={{ fill: '#8fa39b', fontSize: 11, fontFamily: 'monospace' }}
-                  axisLine={{ stroke: '#25322e' }}
+                  stroke="rgba(255, 255, 255, 0.15)"
+                  tick={{ fill: '#8b949e', fontSize: 11, fontFamily: 'monospace' }}
+                  axisLine={{ stroke: 'rgba(255, 255, 255, 0.15)' }}
                   allowDecimals={false}
                 />
                 <Tooltip content={<CustomAnalyticsTooltip />} />
-                <Bar dataKey="count" name="Incidents" radius={[4, 4, 0, 0]}>
+                <Bar dataKey="count" name="Incidents" radius={[6, 6, 0, 0]}>
                   {tierData.map((entry, index) => (
                     <Cell key={`cell-${index}`} fill={entry.color} />
                   ))}
@@ -240,26 +241,26 @@ export const AnalyticsPage: React.FC = () => {
                 data={hourlyActivity}
                 margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
               >
-                <CartesianGrid strokeDasharray="3 3" stroke="#25322e" vertical={false} />
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255, 255, 255, 0.08)" vertical={false} />
                 <XAxis
                   dataKey="hour"
-                  stroke="#5c6f68"
-                  tick={{ fill: '#8fa39b', fontSize: 9, fontFamily: 'monospace' }}
-                  axisLine={{ stroke: '#25322e' }}
+                  stroke="rgba(255, 255, 255, 0.15)"
+                  tick={{ fill: '#8b949e', fontSize: 9, fontFamily: 'monospace' }}
+                  axisLine={{ stroke: 'rgba(255, 255, 255, 0.15)' }}
                   interval={2}
                 />
                 <YAxis
-                  stroke="#5c6f68"
-                  tick={{ fill: '#8fa39b', fontSize: 11, fontFamily: 'monospace' }}
-                  axisLine={{ stroke: '#25322e' }}
+                  stroke="rgba(255, 255, 255, 0.15)"
+                  tick={{ fill: '#8b949e', fontSize: 11, fontFamily: 'monospace' }}
+                  axisLine={{ stroke: 'rgba(255, 255, 255, 0.15)' }}
                   allowDecimals={false}
                 />
                 <Tooltip content={<CustomAnalyticsTooltip />} />
-                <Bar dataKey="count" name="Detections" radius={[2, 2, 0, 0]}>
+                <Bar dataKey="count" name="Detections" radius={[4, 4, 0, 0]}>
                   {hourlyActivity.map((entry, index) => (
                     <Cell
                       key={`cell-${index}`}
-                      fill={entry.isCurfew ? '#e5484d' : '#5fd6c4'}
+                      fill={entry.isCurfew ? '#ff0055' : '#00f0ff'}
                     />
                   ))}
                 </Bar>

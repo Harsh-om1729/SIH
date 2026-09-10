@@ -28,7 +28,7 @@ export const Tabs: React.FC<TabsProps> = ({
     return (
       <div
         className={cn(
-          'inline-flex p-1 bg-bg-surface border border-border-subtle rounded-sm gap-1',
+          'inline-flex p-1 bg-bg-surface/80 border border-border-subtle/80 rounded-xl gap-1 backdrop-blur-sm',
           className
         )}
       >
@@ -40,10 +40,10 @@ export const Tabs: React.FC<TabsProps> = ({
               disabled={tab.disabled}
               onClick={() => onChange(tab.id)}
               className={cn(
-                'flex items-center gap-2 px-3 py-1.5 text-xs font-medium rounded-sm transition-all select-none',
+                'flex items-center gap-2 px-3.5 py-1.5 text-xs font-medium rounded-lg transition-all select-none',
                 isActive
-                  ? 'bg-bg-elevated text-accent-teal shadow-sm border border-border-subtle'
-                  : 'text-text-dim hover:text-text-primary hover:bg-bg-elevated/50 border border-transparent',
+                  ? 'bg-accent-teal/15 text-accent-teal shadow-sm border border-accent-teal/30 font-semibold'
+                  : 'text-text-dim hover:text-text-primary hover:bg-bg-elevated/60 border border-transparent',
                 tab.disabled && 'opacity-40 cursor-not-allowed'
               )}
             >
@@ -52,7 +52,7 @@ export const Tabs: React.FC<TabsProps> = ({
               {tab.count !== undefined && (
                 <span
                   className={cn(
-                    'px-1.5 py-0.2 rounded font-mono text-[10px]',
+                    'px-2 py-0.5 rounded-full text-[10px] font-semibold',
                     isActive
                       ? 'bg-accent-teal/20 text-accent-teal'
                       : 'bg-bg-elevated text-text-muted'

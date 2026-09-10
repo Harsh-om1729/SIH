@@ -130,9 +130,16 @@ export const ZoneCanvas: React.FC<ZoneCanvasProps> = ({
             {cameraName} // REFERENCE FRAME CANVAS
           </span>
           <span className="text-border-subtle">|</span>
-          <span className="text-text-dim">
-            {zones.length} {zones.length === 1 ? 'ZONE' : 'ZONES'} DEFINED
-          </span>
+          {zones.length > 0 ? (
+            <span className="text-accent-teal font-semibold">
+              {zones.length} {zones.length === 1 ? 'ZONE' : 'ZONES'} DEFINED
+            </span>
+          ) : (
+            <span className="text-accent-yellow font-semibold flex items-center gap-1.5 bg-accent-yellow/10 px-2 py-0.5 rounded border border-accent-yellow/30 text-[11px]">
+              <span className="w-1.5 h-1.5 rounded-full bg-accent-yellow animate-pulse" />
+              AUTONOMOUS DEFAULT POLICY ACTIVE
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-3">
@@ -367,6 +374,29 @@ export const ZoneCanvas: React.FC<ZoneCanvasProps> = ({
             </g>
           )}
         </svg>
+
+        {/* Tactical Autonomous Policy Watermark when 0 Zones defined */}
+        {zones.length === 0 && !isDrawing && (
+          <div className="absolute inset-0 flex items-center justify-center pointer-events-none p-6 text-center">
+            <div className="p-4 rounded-2xl bg-black/85 border border-white/10 backdrop-blur-md shadow-2xl max-w-sm space-y-2 text-left pointer-events-auto">
+              <div className="flex items-center justify-between border-b border-white/10 pb-1.5">
+                <span className="font-mono text-xs font-bold text-accent-yellow flex items-center gap-1.5">
+                  <span className="w-2 h-2 rounded-full bg-accent-yellow animate-pulse" />
+                  AUTONOMOUS THREAT POLICY
+                </span>
+                <span className="text-[10px] font-mono text-text-muted">ZERO ZONES</span>
+              </div>
+              <p className="text-[11px] text-text-dim leading-relaxed">
+                Drawing custom zones is strictly optional. The autonomous AI matrix monitors this camera automatically:
+              </p>
+              <div className="flex items-center justify-between pt-1 font-mono text-[10px] bg-white/[0.03] p-2 rounded-lg border border-white/5">
+                <span className="text-accent-yellow font-semibold">DAY: Caution (Tier 2)</span>
+                <span className="text-white/20">•</span>
+                <span className="text-accent-red font-semibold">CURFEW: Critical (Tier 1)</span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Hover Action Popover near selected/hovered zone */}
         {hoveredZoneId && !isDrawing && (

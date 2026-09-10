@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { CameraTile } from '@/components/live';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
@@ -39,7 +40,7 @@ const initialCameras: CameraItem[] = [
     fps: '29.8',
     activity: 'MOTION',
     isActive: true,
-    resolution: '640x480',
+    resolution: '1920x1080',
     activityGate: 'HIGH',
     lowLightBoost: false,
   },
@@ -48,10 +49,10 @@ const initialCameras: CameraItem[] = [
     name: 'cam1',
     location: 'East Checkpoint Bravo',
     sector: 'East Border Sector',
-    fps: '3.0',
+    fps: '30.0',
     activity: 'STANDBY',
     isActive: true,
-    resolution: '640x480',
+    resolution: '1920x1080',
     activityGate: 'LOW',
     lowLightBoost: false,
   },
@@ -63,7 +64,7 @@ const initialCameras: CameraItem[] = [
     fps: '28.4',
     activity: 'ACTIVE',
     isActive: true,
-    resolution: '640x480',
+    resolution: '1920x1080',
     activityGate: 'HIGH',
     lowLightBoost: false,
   },
@@ -75,13 +76,13 @@ const initialCameras: CameraItem[] = [
     fps: '29.5',
     activity: 'NIGHT_IR',
     isActive: true,
-    resolution: '640x480',
+    resolution: '1920x1080',
     activityGate: 'HIGH',
     lowLightBoost: true,
   },
 ];
 
-const CAMERAS_STORAGE_KEY = 'ibvap_cameras_data';
+const CAMERAS_STORAGE_KEY = 'ibvap_cameras_data_v3';
 
 const loadStoredCameras = (): CameraItem[] => {
   try {
@@ -91,7 +92,7 @@ const loadStoredCameras = (): CameraItem[] => {
       if (Array.isArray(parsed) && parsed.length > 0) {
         return parsed.map((cam: any, idx: number) => ({
           ...cam,
-          resolution: cam.resolution || '640x480',
+          resolution: cam.resolution || '1920x1080',
           activityGate: cam.activityGate || (idx === 1 ? 'LOW' : 'HIGH'),
           lowLightBoost: cam.lowLightBoost ?? (idx === 3),
         }));
@@ -103,6 +104,7 @@ const loadStoredCameras = (): CameraItem[] => {
   return initialCameras;
 };
 
+
 export const LiveFeedsPage: React.FC = () => {
   const [cameras, setCameras] = useState<CameraItem[]>(loadStoredCameras);
   const [viewMode, setViewMode] = useState<'grid' | 'focus'>('grid');
@@ -110,14 +112,28 @@ export const LiveFeedsPage: React.FC = () => {
   const [focusedCameraId, setFocusedCameraId] = useState<string>('cam0');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
 
+  const [searchParams] = useSearchParams();
+  const urlCamera = searchParams.get('camera');
+
   // Automatically sync cameras to localStorage across routes and sessions
-  React.useEffect(() => {
+  useEffect(() => {
     try {
       localStorage.setItem(CAMERAS_STORAGE_KEY, JSON.stringify(cameras));
     } catch (e) {
       console.error('Failed to persist cameras', e);
     }
   }, [cameras]);
+
+  // Auto-focus camera when requested via query parameter (e.g. from Detections / View Evidence)
+  useEffect(() => {
+    if (urlCamera) {
+      const match = cameras.find((c) => c.id.toLowerCase() === urlCamera.toLowerCase());
+      if (match) {
+        setFocusedCameraId(match.id);
+        setViewMode('focus');
+      }
+    }
+  }, [urlCamera, cameras]);
 
   // Form State for Adding a Camera
   const [newCamId, setNewCamId] = useState(`cam${cameras.length}`);
@@ -136,6 +152,7 @@ export const LiveFeedsPage: React.FC = () => {
     setFocusedCameraId(camId);
     setViewMode('focus');
   };
+
 
   const handleRemoveCamera = (camId: string) => {
     if (cameras.length <= 1) {
@@ -243,29 +260,29 @@ export const LiveFeedsPage: React.FC = () => {
       )}
 
       {/* Top Toolbar / Filter Row */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 p-3.5 bg-bg-surface border border-border-subtle rounded-sm">
+      <div className="card-3d flex flex-col lg:flex-row lg:items-center justify-between gap-3 p-4 rounded-2xl border border-white/10 bg-gradient-to-b from-[#0c0c14] to-[#06060a] shadow-[0_15px_35px_rgba(0,0,0,0.8)]">
         {/* Left: Camera Count Indicator & Status */}
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex items-center gap-2">
             <Video className="w-4 h-4 text-accent-teal" />
-            <span className="font-mono text-xs font-semibold text-text-primary uppercase tracking-wider">
+            <span className="font-mono text-xs font-bold text-white uppercase tracking-wider">
               Surveillance Grid
             </span>
           </div>
 
-          <span className="text-border-subtle">|</span>
+          <span className="text-white/20">|</span>
 
-          <Badge variant="green" dot pulse size="sm">
+          <Badge variant="green" dot size="sm">
             {cameras.length} CAMERAS · {onlineCount} ONLINE
           </Badge>
 
-          <span className="hidden sm:inline font-mono text-[11px] text-text-muted">
+          <span className="hidden sm:inline font-mono text-[11px] text-text-dim">
             AUTO-RELOAD · RTSP POOL
           </span>
         </div>
 
         {/* Right: Actions & Layout Controls */}
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2.5">
           {/* Add Camera Button */}
           <Button
             variant="primary"
@@ -290,14 +307,14 @@ export const LiveFeedsPage: React.FC = () => {
 
           {/* Grid Columns Switcher (when in grid mode) */}
           {viewMode === 'grid' && cameras.length >= 4 && (
-            <div className="hidden sm:inline-flex p-0.5 bg-bg-elevated border border-border-subtle rounded-sm">
+            <div className="hidden sm:inline-flex p-1 bg-black/60 border border-white/10 rounded-xl shadow-inner">
               <button
                 onClick={() => setGridColumns('2')}
                 title="2 Columns Grid"
-                className={`px-2 py-1 text-[11px] font-mono rounded-sm transition-colors ${
+                className={`px-2.5 py-1 text-[11px] font-mono rounded-lg transition-all ${
                   gridColumns === '2'
-                    ? 'bg-bg-surface text-accent-teal font-semibold shadow-sm'
-                    : 'text-text-dim hover:text-text-primary'
+                    ? 'bg-accent-teal/15 text-accent-teal font-bold border border-accent-teal/40'
+                    : 'text-text-dim hover:text-white'
                 }`}
               >
                 2 COL
@@ -305,10 +322,10 @@ export const LiveFeedsPage: React.FC = () => {
               <button
                 onClick={() => setGridColumns('3')}
                 title="3 Columns Grid"
-                className={`px-2 py-1 text-[11px] font-mono rounded-sm transition-colors ${
+                className={`px-2.5 py-1 text-[11px] font-mono rounded-lg transition-all ${
                   gridColumns === '3'
-                    ? 'bg-bg-surface text-accent-teal font-semibold shadow-sm'
-                    : 'text-text-dim hover:text-text-primary'
+                    ? 'bg-accent-teal/15 text-accent-teal font-bold border border-accent-teal/40'
+                    : 'text-text-dim hover:text-white'
                 }`}
               >
                 3 COL
@@ -317,14 +334,14 @@ export const LiveFeedsPage: React.FC = () => {
           )}
 
           {/* Layout Mode Toggle Buttons */}
-          <div className="inline-flex p-0.5 bg-bg-elevated border border-border-subtle rounded-sm">
+          <div className="inline-flex p-1 bg-black/60 border border-white/10 rounded-xl shadow-inner">
             <button
               onClick={() => setViewMode('grid')}
               title="Grid View"
-              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono font-medium rounded-sm transition-colors ${
+              className={`flex items-center gap-1.5 px-3 py-1 text-xs font-mono font-semibold rounded-lg transition-all ${
                 viewMode === 'grid'
-                  ? 'bg-accent-teal/15 text-accent-teal border border-accent-teal/30'
-                  : 'text-text-dim hover:text-text-primary'
+                  ? 'bg-accent-teal/15 text-accent-teal border border-accent-teal/40'
+                  : 'text-text-dim hover:text-white'
               }`}
             >
               <Grid2X2 className="w-3.5 h-3.5" />
@@ -334,10 +351,10 @@ export const LiveFeedsPage: React.FC = () => {
             <button
               onClick={() => setViewMode('focus')}
               title="Focus View (Single Camera Enlarged)"
-              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-mono font-medium rounded-sm transition-colors ${
+              className={`flex items-center gap-1.5 px-3 py-1 text-xs font-mono font-semibold rounded-lg transition-all ${
                 viewMode === 'focus'
-                  ? 'bg-accent-teal/15 text-accent-teal border border-accent-teal/30'
-                  : 'text-text-dim hover:text-text-primary'
+                  ? 'bg-accent-teal/15 text-accent-teal border border-accent-teal/40'
+                  : 'text-text-dim hover:text-white'
               }`}
             >
               <Maximize2 className="w-3.5 h-3.5" />
@@ -385,6 +402,7 @@ export const LiveFeedsPage: React.FC = () => {
           ))}
         </div>
       ) : (
+
         /* Single Camera Focus View */
         <div className="space-y-4">
           {/* Channel Selector Bar */}
@@ -429,33 +447,22 @@ export const LiveFeedsPage: React.FC = () => {
             />
           </div>
 
-          {/* Focus Telemetry & Diagnostics Box */}
-          <div className="max-w-5xl mx-auto p-4 bg-bg-surface border border-border-subtle rounded-sm grid grid-cols-2 sm:grid-cols-5 gap-4 font-mono text-xs">
+          {/* Quick Diagnostics Strip for Focused Camera */}
+          <div className="card-3d max-w-5xl mx-auto p-3.5 bg-[#090c12] border border-white/10 rounded-2xl grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono text-xs shadow-lg">
             <div>
               <span className="text-text-muted block text-[10px] uppercase">
-                Channel ID
+                Hardware Health
               </span>
-              <span className="text-accent-teal font-semibold text-sm">
-                {focusedCamera.id.toUpperCase()}
+              <span className="text-accent-green font-semibold flex items-center gap-1">
+                ONLINE · RTSP LIVE
               </span>
-              <span className="text-[10px] text-text-muted block">
-                {focusedCamera.resolution || '640x480'}
+              <span className="text-[10px] text-text-dim">
+                Stream Latency: ~42ms
               </span>
             </div>
             <div>
               <span className="text-text-muted block text-[10px] uppercase">
-                Location & Sector
-              </span>
-              <span className="text-text-primary font-medium truncate block">
-                {focusedCamera.location}
-              </span>
-              <span className="text-[10px] text-text-dim truncate block">
-                {focusedCamera.sector}
-              </span>
-            </div>
-            <div>
-              <span className="text-text-muted block text-[10px] uppercase">
-                Activity Gate
+                Activity Gating
               </span>
               <span
                 className={`font-semibold flex items-center gap-1 ${
@@ -479,7 +486,7 @@ export const LiveFeedsPage: React.FC = () => {
               <span
                 className={`flex items-center gap-1 ${
                   focusedCamera.lowLightBoost
-                    ? 'text-accent-purple font-medium'
+                    ? 'text-accent-yellow font-medium'
                     : 'text-text-dim'
                 }`}
               >
@@ -503,6 +510,7 @@ export const LiveFeedsPage: React.FC = () => {
           </div>
         </div>
       )}
+
 
       {/* Add Camera Modal Dialog */}
       <Modal

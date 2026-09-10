@@ -3,51 +3,97 @@
 @tailwind utilities;
 
 :root {
-  --bg-primary: #0a0f0d;
-  --bg-surface: #111917;
-  --bg-elevated: #16201d;
-  --border-subtle: #25322e;
-  --text-muted: #5c6f68;
-  --text-dim: #8fa39b;
-  --text-primary: #e6ece9;
-  --accent-teal: #5fd6c4;
-  --accent-green: #4fbf7a;
-  --accent-green-deep: #2f6e64;
-  --accent-yellow: #e6c34a;
-  --accent-red: #e5484d;
+  --bg-primary: #05070a;
+  --bg-surface: #090b10;
+  --bg-elevated: #0f121a;
+  --border-subtle: #161924;
+  --text-muted: #5c667a;
+  --text-dim: #8c98a8;
+  --text-primary: #f0f4f8;
+  --accent-teal: #00d2df;
+  --accent-cyan: #00c4df;
+  --accent-green: #00e077;
+  --accent-green-deep: #00994d;
+  --accent-yellow: #f09f00;
+  --accent-red: #f02555;
 }
 
 @layer base {
   body {
-    background-color: var(--bg-primary);
+    background-color: #05070a;
     color: var(--text-primary);
-    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
-  /* Custom tactical scrollbar */
+  /* Minimal Dark Scrollbar */
   ::-webkit-scrollbar {
     width: 6px;
     height: 6px;
   }
 
   ::-webkit-scrollbar-track {
-    background: #0a0f0d;
+    background: #05070a;
   }
 
   ::-webkit-scrollbar-thumb {
-    background: #25322e;
-    border-radius: 3px;
+    background: #141722;
+    border-radius: 9999px;
+    border: 1px solid rgba(255, 255, 255, 0.04);
   }
 
   ::-webkit-scrollbar-thumb:hover {
-    background: #5c6f68;
+    background: #1d2232;
   }
 }
 
-/* Subtle tactical radar / scanline background pattern */
+/* Tactical Matrix Dark Grid Background */
 .bg-tactical-grid {
+  background-color: #05070a;
+  background-image: radial-gradient(rgba(255, 255, 255, 0.035) 1px, transparent 1px);
   background-size: 24px 24px;
-  background-image: 
-    linear-gradient(to right, rgba(37, 50, 46, 0.25) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(37, 50, 46, 0.25) 1px, transparent 1px);
 }
+
+/* Neutral subtle ambient lighting */
+.ambient-glow {
+  background: none;
+}
+
+/* Matte Dark Surfaces */
+.card-3d {
+  background: #090c12;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.7);
+  transition: border-color 0.15s ease;
+}
+
+.card-3d:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+/* Clean Functional Buttons */
+.btn-3d-primary {
+  background: #008fa0;
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-3d-primary:hover {
+  background: #00a4b8;
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.btn-3d-secondary {
+  background: #0e111a;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: #e2e8f0;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.btn-3d-secondary:hover {
+  background: #141824;
+  border-color: rgba(255, 255, 255, 0.15);
+}
+

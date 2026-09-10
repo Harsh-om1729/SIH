@@ -41,6 +41,20 @@ export interface HourlyActivityData {
   isCurfew: boolean;
 }
 
+export interface RealtimeThreatPoint {
+  id: number;
+  trackId: number;
+  timeLabel: string;
+  timestamp: number;
+  threatScore: number;
+  tier: 'red' | 'yellow' | 'green';
+  category: 'person' | 'vehicle' | 'unknown';
+  cameraName: string;
+  red: number;
+  yellow: number;
+  green: number;
+}
+
 // 1. Derive Summary KPI Numbers
 export function getDashboardStats(incidents: Incident[] = mockIncidents): DashboardStats {
   const totalIncidents = incidents.length;
@@ -59,7 +73,41 @@ export function getDashboardStats(incidents: Incident[] = mockIncidents): Dashbo
   };
 }
 
-// 2. Derive 24-Hour Threat Timeline
+// 2. Derive Real-Time Telemetry Stream (Synchronized with incoming alert notifications)
+export function getRealtimeThreatStream(
+  incidents: Incident[] = mockIncidents,
+  maxPoints = 14
+): RealtimeThreatPoint[] {
+  // Sort chronologically ascending (oldest to newest) so stream moves left-to-right
+  const sorted = [...incidents].sort((a, b) => a.timestamp - b.timestamp);
+  const slice = sorted.slice(-maxPoints);
+
+  return slice.map((inc) => {
+    const d = new Date(inc.timestamp * 1000);
+    const timeLabel = d.toLocaleTimeString('en-GB', {
+      hour12: false,
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    });
+
+    return {
+      id: inc.id,
+      trackId: inc.trackId,
+      timeLabel,
+      timestamp: inc.timestamp,
+      threatScore: inc.score,
+      tier: inc.tier,
+      category: inc.category,
+      cameraName: inc.cameraName,
+      red: inc.tier === 'red' ? inc.score : 0,
+      yellow: inc.tier === 'yellow' ? inc.score : 0,
+      green: inc.tier === 'green' ? inc.score : 0,
+    };
+  });
+}
+
+// 3. Derive 24-Hour Threat Timeline
 export function getHourlyThreatTimeline(incidents: Incident[] = mockIncidents): TimelineBucket[] {
   const now = Math.floor(Date.now() / 1000);
   // Create 6 4-hour intervals covering the 24h window
@@ -91,6 +139,7 @@ export function getHourlyThreatTimeline(incidents: Incident[] = mockIncidents): 
   });
 }
 
+
 // 3. Category Distribution (Donut Chart)
 export function getCategoryDistribution(incidents: Incident[] = mockIncidents): CategoryData[] {
   const persons = incidents.filter((i) => i.category === 'person').length;
@@ -98,9 +147,9 @@ export function getCategoryDistribution(incidents: Incident[] = mockIncidents): 
   const unknown = incidents.filter((i) => i.category === 'unknown').length;
 
   return [
-    { name: 'Person Targets', value: persons, color: '#5fd6c4' }, // accent-teal
-    { name: 'Vehicle Targets', value: vehicles, color: '#e6c34a' }, // accent-yellow
-    { name: 'Unknown / Thermal', value: unknown, color: '#8fa39b' }, // text-dim
+    { name: 'Person Targets', value: persons, color: '#00f0ff' }, // cyber-cyan
+    { name: 'Vehicle Targets', value: vehicles, color: '#ffaa00' }, // solar-amber
+    { name: 'Unknown / Thermal', value: unknown, color: '#8b949e' }, // text-dim
   ];
 }
 
@@ -139,9 +188,9 @@ export function getTierDistribution(incidents: Incident[] = mockIncidents): Tier
   const red = incidents.filter((i) => i.tier === 'red').length;
 
   return [
-    { tier: 'Green Tier (Normal)', count: green, color: '#4fbf7a' },
-    { tier: 'Yellow Tier (Caution)', count: yellow, color: '#e6c34a' },
-    { tier: 'Red Tier (Critical)', count: red, color: '#e5484d' },
+    { tier: 'Green Tier (Normal)', count: green, color: '#00ff88' },
+    { tier: 'Yellow Tier (Caution)', count: yellow, color: '#ffaa00' },
+    { tier: 'Red Tier (Critical)', count: red, color: '#ff0055' },
   ];
 }
 

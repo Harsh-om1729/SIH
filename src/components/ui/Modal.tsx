@@ -51,16 +51,16 @@ export const Modal: React.FC<ModalProps> = ({
       {/* Modal Dialog */}
       <div
         className={cn(
-          'relative w-full bg-bg-surface border border-border-subtle rounded-sm shadow-2xl z-10 overflow-hidden flex flex-col',
+          'relative w-full bg-bg-surface/95 backdrop-blur-md border border-border-subtle/80 rounded-2xl shadow-2xl z-10 overflow-hidden flex flex-col',
           sizes[size],
           className
         )}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border-subtle bg-bg-surface/90">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border-subtle/60 bg-bg-surface/80">
           <div>
             {title && (
-              <h3 className="text-base font-semibold tracking-wide text-text-primary">
+              <h3 className="text-base font-semibold tracking-tight text-text-primary">
                 {title}
               </h3>
             )}
@@ -71,18 +71,18 @@ export const Modal: React.FC<ModalProps> = ({
           <button
             onClick={onClose}
             aria-label="Close dialog"
-            className="p-1 rounded-sm text-text-muted hover:text-text-primary hover:bg-bg-elevated transition-colors"
+            className="p-1.5 rounded-lg text-text-muted hover:text-text-primary hover:bg-bg-elevated transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
         </div>
 
         {/* Content */}
-        <div className="p-5 overflow-y-auto max-h-[75vh]">{children}</div>
+        <div className="p-6 overflow-y-auto max-h-[75vh]">{children}</div>
 
         {/* Footer */}
         {footer && (
-          <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border-subtle bg-bg-surface/40">
+          <div className="flex items-center justify-end gap-2 px-6 py-3.5 border-t border-border-subtle/60 bg-bg-surface/40">
             {footer}
           </div>
         )}

@@ -117,7 +117,7 @@ export const mockIncidents: Incident[] = [
       generateEvidenceSvg("cam0", "16:54:12 UTC", "BURST FRAME 2/3", "#e5484d", 9042, "CROSSING FENCE LINE"),
       generateEvidenceSvg("cam0", "16:54:13 UTC", "BURST FRAME 3/3", "#e5484d", 9042, "INWARD VECTOR CONFIRMED"),
     ],
-    watchlistMatch: "TARIQ AHMED",
+    watchlistMatch: null,
     breakdown: { sectorRisk: 38.0, timeRisk: 23.5, kinematicsRisk: 18.5, classConfidence: 14.2 },
     reidGalleryId: "PG-9042",
     encryption: { cipher: "FERNET-AES128-CBC", keyPath: "database/evidence.key", verified: true },
@@ -150,16 +150,16 @@ export const mockIncidents: Incident[] = [
     category: "person",
     zoneTier: "yellow",
     score: 88.0,
-    tier: "red", // Escalated to RED due to watchlist match!
+    tier: "red", // Escalated to RED due to sector proximity & kinematics!
     timestamp: now - 950, // 15 mins ago
     cameraName: "cam1",
-    snapshotUrl: generateEvidenceSvg("cam1", "16:41:20 UTC", "PERSON // ESCALATED", "#e5484d", 9038, "WATCHLIST MATCH ESCALATED TO RED", "S:25.0 T:21.0 K:15.0 C:14.0 [OVERRIDE >=70]"),
+    snapshotUrl: generateEvidenceSvg("cam1", "16:41:20 UTC", "PERSON // ESCALATED", "#e5484d", 9038, "PERSON DETECT ESCALATED TO RED", "S:25.0 T:21.0 K:15.0 C:14.0 [OVERRIDE >=70]"),
     cropUrl: generateEvidenceSvg("cam1", "16:41:20 UTC", "FACE CROP", "#e5484d", 9038, "SIMILARITY 92.4%"),
     burstUrls: [
       generateEvidenceSvg("cam1", "16:41:19 UTC", "BURST 1/2", "#e5484d", 9038, "EAST CHECKPOST ENTRY"),
       generateEvidenceSvg("cam1", "16:41:21 UTC", "BURST 2/2", "#e5484d", 9038, "MONITORED SUBJECT"),
     ],
-    watchlistMatch: "VIKRAM SINGH",
+    watchlistMatch: null,
     breakdown: { sectorRisk: 25.0, timeRisk: 21.0, kinematicsRisk: 15.0, classConfidence: 14.0 },
     reidGalleryId: "PG-9038",
     encryption: { cipher: "FERNET-AES128-CBC", keyPath: "database/evidence.key", verified: true },
@@ -235,13 +235,13 @@ export const mockIncidents: Incident[] = [
     tier: "red",
     timestamp: now - 4500, // 1h 15m ago
     cameraName: "cam3",
-    snapshotUrl: generateEvidenceSvg("cam3", "15:42:15 UTC", "PERSON // RED SECTOR", "#e5484d", 9024, "HIGH PRIORITY SUSPECT DETECTED", "S:39.0 T:24.0 K:19.0 C:15.0"),
-    cropUrl: generateEvidenceSvg("cam3", "15:42:15 UTC", "FACE CROP", "#e5484d", 9024, "INSIGHTFACE MATCH 98.1%"),
+    snapshotUrl: generateEvidenceSvg("cam3", "15:42:15 UTC", "PERSON // RED SECTOR", "#e5484d", 9024, "HIGH PRIORITY PERSON DETECT", "S:39.0 T:24.0 K:19.0 C:15.0"),
+    cropUrl: generateEvidenceSvg("cam3", "15:42:15 UTC", "FACE CROP", "#e5484d", 9024, "PERSON DETECT CONFIDENCE 98.1%"),
     burstUrls: [
       generateEvidenceSvg("cam3", "15:42:14 UTC", "BURST 1/2", "#e5484d", 9024, "COVERT CRAWL IN VEGETATION"),
       generateEvidenceSvg("cam3", "15:42:16 UTC", "BURST 2/2", "#e5484d", 9024, "CROSSING DRY RIVERBED"),
     ],
-    watchlistMatch: "BILAL HUSSAIN",
+    watchlistMatch: null,
     breakdown: { sectorRisk: 39.0, timeRisk: 24.0, kinematicsRisk: 19.0, classConfidence: 15.0 },
     reidGalleryId: "PG-9024",
     encryption: { cipher: "FERNET-AES128-CBC", keyPath: "database/evidence.key", verified: true },
@@ -313,14 +313,14 @@ export const mockIncidents: Incident[] = [
     tier: "red",
     timestamp: now - 9800, // ~2.7 hrs ago
     cameraName: "cam0",
-    snapshotUrl: generateEvidenceSvg("cam0", "14:13:22 UTC", "PERSON // RE-ENTRY ATTEMPT", "#e5484d", 9003, "PRIOR WATCHLIST SUBJECT SPOTTED", "S:38.0 T:24.0 K:19.0 C:14.8"),
+    snapshotUrl: generateEvidenceSvg("cam0", "14:13:22 UTC", "PERSON // RE-ENTRY ATTEMPT", "#e5484d", 9003, "PERSON DETECT SPEED EXCEEDED", "S:38.0 T:24.0 K:19.0 C:14.8"),
     cropUrl: generateEvidenceSvg("cam0", "14:13:22 UTC", "FACE CROP", "#e5484d", 9003, "CONFIRMATION 94.7%"),
     burstUrls: [
       generateEvidenceSvg("cam0", "14:13:21 UTC", "BURST 1/3", "#e5484d", 9003, "SURVEILLANCE IDENTIFICATION"),
       generateEvidenceSvg("cam0", "14:13:23 UTC", "BURST 2/3", "#e5484d", 9003, "FENCE BREACH ATTEMPT"),
       generateEvidenceSvg("cam0", "14:13:24 UTC", "BURST 3/3", "#e5484d", 9003, "PATROL ALARM TRIGGERED"),
     ],
-    watchlistMatch: "TARIQ AHMED",
+    watchlistMatch: null,
     breakdown: { sectorRisk: 38.0, timeRisk: 24.0, kinematicsRisk: 19.0, classConfidence: 14.8 },
     reidGalleryId: "PG-9003",
     encryption: { cipher: "FERNET-AES128-CBC", keyPath: "database/evidence.key", verified: true },
@@ -389,13 +389,13 @@ export const mockIncidents: Incident[] = [
     tier: "red", // Escalated to RED
     timestamp: now - 16800, // ~4.6 hrs ago
     cameraName: "cam1",
-    snapshotUrl: generateEvidenceSvg("cam1", "12:16:21 UTC", "PERSON // FLAGGED SUSPECT", "#e5484d", 8979, "WATCHLIST PERSON ESCALATED", "S:24.0 T:20.0 K:16.5 C:14.0 [OVERRIDE >=70]"),
+    snapshotUrl: generateEvidenceSvg("cam1", "12:16:21 UTC", "PERSON // FLAGGED SUSPECT", "#e5484d", 8979, "PERSON DETECT ESCALATED", "S:24.0 T:20.0 K:16.5 C:14.0 [OVERRIDE >=70]"),
     cropUrl: generateEvidenceSvg("cam1", "12:16:21 UTC", "FACE CROP", "#e5484d", 8979, "MATCH CONFIRMED 89%"),
     burstUrls: [
       generateEvidenceSvg("cam1", "12:16:20 UTC", "BURST 1/2", "#e5484d", 8979, "APPROACHING CULVERT"),
       generateEvidenceSvg("cam1", "12:16:22 UTC", "BURST 2/2", "#e5484d", 8979, "SECTOR ALERT DISPATCHED"),
     ],
-    watchlistMatch: "RASHID MALIK",
+    watchlistMatch: null,
     breakdown: { sectorRisk: 24.0, timeRisk: 20.0, kinematicsRisk: 16.5, classConfidence: 14.0 },
     reidGalleryId: "PG-8979",
     encryption: { cipher: "FERNET-AES128-CBC", keyPath: "database/evidence.key", verified: true },

@@ -10,7 +10,9 @@ interface AlertContextType {
   activeToasts: Incident[];
   backendStatus: WsConnectionStatus;
   soundEnabled: boolean;
+  popupsMuted: boolean;
   toggleSound: () => void;
+  toggleMutePopups: () => void;
   dismissToast: (id: number) => void;
   acknowledgeAlert: (id: number) => void;
   markAllAsRead: () => void;
@@ -21,15 +23,19 @@ const AlertContext = createContext<AlertContextType | undefined>(undefined);
 
 const LOCAL_STORAGE_KEY = 'ibvap_alerts_data';
 const SOUND_STORAGE_KEY = 'ibvap_sound_enabled';
+const POPUPS_MUTED_STORAGE_KEY = 'ibvap_popups_muted';
 const MAX_TOASTS = 4;
 
 export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  // Load initial alerts from localStorage or fallback to mockIncidents
+  // Load initial alerts from localStorage (sanitizing any legacy watchlist names) or fallback to mockIncidents
   const [alerts, setAlerts] = useState<Incident[]>(() => {
     try {
       const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
       if (saved) {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed)) {
+          return parsed.map((item: any) => ({ ...item, watchlistMatch: null }));
+        }
       }
     } catch {
       // ignore JSON parse error
@@ -55,6 +61,15 @@ export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     }
   });
 
+  const [popupsMuted, setPopupsMuted] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem(POPUPS_MUTED_STORAGE_KEY);
+      return saved !== null ? JSON.parse(saved) : false;
+    } catch {
+      return false;
+    }
+  });
+
   const toggleSound = useCallback(() => {
     setSoundEnabled((prev) => {
       const next = !prev;
@@ -62,6 +77,21 @@ export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         localStorage.setItem(SOUND_STORAGE_KEY, JSON.stringify(next));
       } catch {
         // ignore
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleMutePopups = useCallback(() => {
+    setPopupsMuted((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem(POPUPS_MUTED_STORAGE_KEY, JSON.stringify(next));
+      } catch {
+        // ignore
+      }
+      if (next) {
+        setActiveToasts([]);
       }
       return next;
     });
@@ -96,18 +126,20 @@ export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) =
   // Process a new incoming alert
   const handleIncomingAlert = useCallback(
     (incident: Incident) => {
-      setAlerts((prev) => [incident, ...prev]);
+      // Clean any accidental name field
+      const sanitizedIncident = { ...incident, watchlistMatch: null };
+      setAlerts((prev) => [sanitizedIncident, ...prev]);
 
       // Green tier: silent logging (no toast, no unread badge increment, no audio)
-      if (incident.tier === 'green') {
+      if (sanitizedIncident.tier === 'green') {
         return;
       }
 
-      // Yellow & Red tiers play synthesized tones (880Hz chime or 1200Hz siren)
-      if (soundEnabled) {
-        if (incident.tier === 'yellow') {
+      // Yellow & Red tiers play synthesized tones only if sound is enabled AND popups aren't muted
+      if (soundEnabled && !popupsMuted) {
+        if (sanitizedIncident.tier === 'yellow') {
           playYellowChime();
-        } else if (incident.tier === 'red') {
+        } else if (sanitizedIncident.tier === 'red') {
           playRedSiren();
         }
       }
@@ -115,20 +147,22 @@ export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) =
       // Yellow & Red tiers increment unread count
       setUnreadCount((prev) => prev + 1);
 
-      // Add to active toasts (capped at MAX_TOASTS)
-      setActiveToasts((prev) => {
-        const updated = [incident, ...prev.filter((t) => t.id !== incident.id)];
-        return updated.slice(0, MAX_TOASTS);
-      });
+      // Add to active toasts ONLY IF POPUPS ARE NOT MUTED
+      if (!popupsMuted) {
+        setActiveToasts((prev) => {
+          const updated = [sanitizedIncident, ...prev.filter((t) => t.id !== sanitizedIncident.id)];
+          return updated.slice(0, MAX_TOASTS);
+        });
 
-      // Yellow auto-dismisses after 6 seconds
-      if (incident.tier === 'yellow') {
-        setTimeout(() => {
-          dismissToast(incident.id);
-        }, 6000);
+        // Yellow auto-dismisses after 6 seconds
+        if (sanitizedIncident.tier === 'yellow') {
+          setTimeout(() => {
+            dismissToast(sanitizedIncident.id);
+          }, 6000);
+        }
       }
     },
-    [dismissToast, soundEnabled]
+    [dismissToast, soundEnabled, popupsMuted]
   );
 
   // Expose trigger for manual demo testing
@@ -136,10 +170,9 @@ export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     (tier?: 'green' | 'yellow' | 'red' | 'watchlist') => {
       const targetTier = tier === 'watchlist' ? 'red' : tier;
       const incident = generateSimulatedIncident(targetTier);
+      incident.watchlistMatch = null;
       if (tier === 'watchlist') {
-        incident.watchlistMatch = 'Kashif Ali (W-8812)';
-        incident.personId = 8812;
-        incident.reidGalleryId = 'PG-W8812';
+        incident.category = 'person';
         incident.score = 98.5;
         incident.tier = 'red';
       }
@@ -189,7 +222,9 @@ export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         activeToasts,
         backendStatus,
         soundEnabled,
+        popupsMuted,
         toggleSound,
+        toggleMutePopups,
         dismissToast,
         acknowledgeAlert,
         markAllAsRead,

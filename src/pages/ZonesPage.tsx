@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Zone, initialMockZones } from '@/lib/mockZones';
+import { ZONE_PRESETS, ZonePreset } from '@/lib/zonePresets';
 import { ZoneCanvas } from '@/components/zones';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -18,9 +19,9 @@ import {
   ArrowDownRight,
   ArrowUpRight,
   RotateCcw,
-  Zap,
-  Clock,
-  Activity,
+  Copy,
+  Sparkles,
+  ChevronDown,
 } from 'lucide-react';
 
 const ZONES_STORAGE_KEY = 'ibvap_zones_data';
@@ -64,10 +65,6 @@ export const ZonesPage: React.FC = () => {
   const [formTier, setFormTier] = useState<'green' | 'yellow' | 'red'>('red');
   const [formLabel, setFormLabel] = useState('');
   const [formDirection, setFormDirection] = useState<'inward' | 'outward'>('inward');
-  const [formTripwire, setFormTripwire] = useState(false);
-  const [formLoitering, setFormLoitering] = useState<number>(0);
-  const [formClimbing, setFormClimbing] = useState(false);
-  const [tripwireBreachCount, setTripwireBreachCount] = useState(0);
   const [formError, setFormError] = useState('');
 
   // Confirmation & Toast Feedback
@@ -75,6 +72,12 @@ export const ZonesPage: React.FC = () => {
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [zoneToDeleteId, setZoneToDeleteId] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Quick Presets & Clone State
+  const [isPresetMenuOpen, setIsPresetMenuOpen] = useState(false);
+  const [isCloneModalOpen, setIsCloneModalOpen] = useState(false);
+  const [selectedCloneTargets, setSelectedCloneTargets] = useState<string[]>([]);
+  const [cloneOverwrite, setCloneOverwrite] = useState(true);
 
   const showToast = (msg: string) => {
     setToastMessage(msg);
@@ -92,9 +95,6 @@ export const ZonesPage: React.FC = () => {
     setFormTier('red');
     setFormLabel(`Priority Zone ${cameraZones.length + 1}`);
     setFormDirection('inward');
-    setFormTripwire(false);
-    setFormLoitering(0);
-    setFormClimbing(false);
     setFormError('');
     setIsFormOpen(true);
   };
@@ -105,9 +105,6 @@ export const ZonesPage: React.FC = () => {
     setFormTier(zone.tier);
     setFormLabel(zone.label);
     setFormDirection(zone.direction || 'inward');
-    setFormTripwire(zone.tripwireEnabled ?? false);
-    setFormLoitering(zone.loiteringThresholdSeconds ?? 0);
-    setFormClimbing(zone.climbingDetection ?? false);
     setFormError('');
     setIsFormOpen(true);
   };
@@ -129,9 +126,6 @@ export const ZonesPage: React.FC = () => {
             tier: formTier,
             label: formLabel.trim(),
             direction: formTier === 'yellow' ? formDirection : undefined,
-            tripwireEnabled: formTripwire,
-            loiteringThresholdSeconds: formLoitering > 0 ? formLoitering : undefined,
-            climbingDetection: formClimbing,
           };
         }
         return z;
@@ -147,9 +141,6 @@ export const ZonesPage: React.FC = () => {
         label: formLabel.trim(),
         points: inProgressPoints,
         direction: formTier === 'yellow' ? formDirection : undefined,
-        tripwireEnabled: formTripwire,
-        loiteringThresholdSeconds: formLoitering > 0 ? formLoitering : undefined,
-        climbingDetection: formClimbing,
       };
       setAllZones((prev) => [...prev, newZone]);
       setSelectedZoneId(newZone.id);
@@ -225,6 +216,88 @@ export const ZonesPage: React.FC = () => {
     return combined.sort();
   }, [allZones]);
 
+  // Other cameras that currently have at least 1 zone configured
+  const otherCamerasWithZones = useMemo(() => {
+    return availableCameras.filter(
+      (cam) => cam !== selectedCamera && allZones.some((z) => z.cameraName === cam)
+    );
+  }, [availableCameras, selectedCamera, allZones]);
+
+  // 1-Click Zone Preset Application
+  const handleApplyPreset = (preset: ZonePreset, overwrite: boolean = true) => {
+    const newZones = preset.createZones(selectedCamera);
+    setAllZones((prev) => {
+      const filtered = overwrite ? prev.filter((z) => z.cameraName !== selectedCamera) : prev;
+      return [...filtered, ...newZones];
+    });
+    setSelectedZoneId(newZones[0]?.id || null);
+    setIsPresetMenuOpen(false);
+    showToast(`Applied "${preset.name}" preset to ${selectedCamera.toUpperCase()} (${newZones.length} zones active)`);
+  };
+
+  // Open Clone Modal
+  const handleOpenCloneModal = () => {
+    const others = availableCameras.filter((c) => c !== selectedCamera);
+    setSelectedCloneTargets(others);
+    setIsCloneModalOpen(true);
+  };
+
+  // Execute Bulk Camera Cloning
+  const handleConfirmClone = () => {
+    if (cameraZones.length === 0) {
+      showToast('No zones on active camera to clone');
+      return;
+    }
+    if (selectedCloneTargets.length === 0) {
+      showToast('Select at least one destination camera');
+      return;
+    }
+
+    const clonedZones: Zone[] = [];
+    selectedCloneTargets.forEach((targetCam) => {
+      cameraZones.forEach((sourceZone, idx) => {
+        clonedZones.push({
+          ...sourceZone,
+          id: `zone-${targetCam}-${Date.now()}-${idx}`,
+          cameraName: targetCam,
+          points: sourceZone.points.map((p) => ({ ...p })),
+        });
+      });
+    });
+
+    setAllZones((prev) => {
+      let filtered = prev;
+      if (cloneOverwrite) {
+        filtered = prev.filter((z) => !selectedCloneTargets.includes(z.cameraName));
+      }
+      return [...filtered, ...clonedZones];
+    });
+
+    setIsCloneModalOpen(false);
+    showToast(`Cloned ${cameraZones.length} zones to ${selectedCloneTargets.length} camera(s) (${selectedCloneTargets.map((c) => c.toUpperCase()).join(', ')})`);
+  };
+
+  // Copy zones from a specific reference camera into active camera
+  const handleCopyFromCamera = (sourceCamera: string) => {
+    const sourceZones = allZones.filter((z) => z.cameraName === sourceCamera);
+    if (sourceZones.length === 0) {
+      showToast(`No zones found on ${sourceCamera.toUpperCase()}`);
+      return;
+    }
+    const cloned = sourceZones.map((z, idx) => ({
+      ...z,
+      id: `zone-${selectedCamera}-${Date.now()}-${idx}`,
+      cameraName: selectedCamera,
+      points: z.points.map((p) => ({ ...p })),
+    }));
+    setAllZones((prev) => {
+      const filtered = prev.filter((z) => z.cameraName !== selectedCamera);
+      return [...filtered, ...cloned];
+    });
+    setSelectedZoneId(cloned[0]?.id || null);
+    showToast(`Copied ${cloned.length} zones from ${sourceCamera.toUpperCase()} to ${selectedCamera.toUpperCase()}`);
+  };
+
   return (
     <div className="space-y-5">
       {/* Toast Feedback */}
@@ -236,10 +309,10 @@ export const ZonesPage: React.FC = () => {
       )}
 
       {/* Top Toolbar: Camera Selector & Global Zone Actions */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-bg-surface border border-border-subtle rounded-sm">
+      <div className="card-3d flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-4 bg-gradient-to-b from-[#0c0c14] to-[#06060a] border border-white/10 rounded-2xl shadow-[0_15px_35px_rgba(0,0,0,0.8)]">
         {/* Camera Selector Tabs */}
         <div className="flex items-center gap-2 overflow-x-auto pb-1 sm:pb-0">
-          <span className="font-mono text-xs text-text-dim uppercase tracking-wider shrink-0 mr-1">
+          <span className="font-mono text-xs font-semibold text-text-dim uppercase tracking-wider shrink-0 mr-1">
             Active Camera:
           </span>
           {availableCameras.map((cam) => {
@@ -253,13 +326,13 @@ export const ZonesPage: React.FC = () => {
                   setSelectedZoneId(null);
                   setIsDrawing(false);
                 }}
-                className={`px-3 py-1.5 text-xs font-mono rounded-sm transition-all flex items-center gap-2 border shrink-0 ${
+                className={`px-3.5 py-1.5 text-xs font-mono rounded-xl transition-all flex items-center gap-2 border shrink-0 ${
                   isSelected
-                    ? 'bg-accent-teal/20 text-accent-teal border-accent-teal/50 font-semibold shadow-sm'
-                    : 'bg-bg-elevated text-text-dim border-border-subtle hover:text-text-primary'
+                    ? 'bg-accent-teal/20 text-accent-teal border-accent-teal/50 font-bold shadow-[0_0_12px_rgba(0,240,255,0.25)]'
+                    : 'bg-black/60 text-text-dim border-white/10 hover:text-white hover:border-white/20'
                 }`}
               >
-                <span className="w-1.5 h-1.5 rounded-full bg-accent-green" />
+                <span className="w-1.5 h-1.5 rounded-full bg-accent-green shadow-[0_0_6px_#00ff88]" />
                 <span>{cam.toUpperCase()}</span>
                 <span className="text-[10px] text-text-muted">({count})</span>
               </button>
@@ -268,7 +341,67 @@ export const ZonesPage: React.FC = () => {
         </div>
 
         {/* Global Action Buttons */}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          {/* Quick Presets Dropdown */}
+          <div className="relative">
+            <Button
+              variant="secondary"
+              size="sm"
+              leftIcon={<Sparkles className="w-3.5 h-3.5 text-accent-teal" />}
+              rightIcon={<ChevronDown className="w-3 h-3 text-text-muted" />}
+              onClick={() => setIsPresetMenuOpen((prev) => !prev)}
+            >
+              Presets
+            </Button>
+
+            {isPresetMenuOpen && (
+              <>
+                <div
+                  className="fixed inset-0 z-40"
+                  onClick={() => setIsPresetMenuOpen(false)}
+                />
+                <div className="absolute right-0 mt-1.5 w-72 bg-[#080c14] border border-white/15 rounded-xl shadow-2xl p-2 z-50 space-y-1 font-mono text-xs backdrop-blur-xl animate-in fade-in zoom-in-95 duration-150">
+                  <div className="px-2.5 py-1.5 text-[10px] text-text-muted uppercase font-bold border-b border-white/10 flex items-center justify-between">
+                    <span>1-Click Zone Presets</span>
+                    <span className="text-accent-teal">AUTO-TIER</span>
+                  </div>
+                  {ZONE_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      onClick={() => handleApplyPreset(preset, true)}
+                      className="w-full p-2.5 rounded-lg hover:bg-white/[0.06] text-left transition-colors flex flex-col gap-0.5 group"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-white font-bold group-hover:text-accent-teal transition-colors">
+                          {preset.name}
+                        </span>
+                        <span className="text-[9px] px-1.5 py-0.2 rounded bg-accent-teal/15 text-accent-teal font-semibold">
+                          {preset.badge}
+                        </span>
+                      </div>
+                      <span className="text-[11px] font-sans text-text-dim leading-snug">
+                        {preset.description}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Clone to Cameras */}
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={cameraZones.length === 0}
+            leftIcon={<Copy className="w-3.5 h-3.5 text-accent-yellow" />}
+            onClick={handleOpenCloneModal}
+            title={cameraZones.length === 0 ? 'Configure at least one zone to clone' : 'Clone zones to other cameras'}
+          >
+            Clone to Cameras...
+          </Button>
+
+          {/* Clear Zones */}
           <Button
             variant="secondary"
             size="sm"
@@ -279,6 +412,7 @@ export const ZonesPage: React.FC = () => {
             Clear Zones
           </Button>
 
+          {/* Save Zones */}
           <Button
             variant="primary"
             size="sm"
@@ -292,8 +426,8 @@ export const ZonesPage: React.FC = () => {
 
       {/* Main 2-Column Command Workspace */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* Left Column: Interactive Polygon Canvas Editor (8 Cols) */}
-        <div className="lg:col-span-8 space-y-4">
+        {/* Left Column: Interactive Polygon Canvas Editor & Aligned Tier Rules (8 Cols) */}
+        <div className="lg:col-span-8 space-y-5">
           <ZoneCanvas
             cameraName={selectedCamera}
             zones={cameraZones}
@@ -306,9 +440,60 @@ export const ZonesPage: React.FC = () => {
             onCancelDrawing={() => setIsDrawing(false)}
             onFinishDrawing={handleFinishDrawing}
           />
+
+          {/* Operational Tier Rule Legend - Perfectly aligned with the Map Canvas */}
+          <Card
+            title="Border Tier Rules & Logic"
+            subtitle="Autonomous perimeter threat scoring behavior & boundary classifications"
+            variant="default"
+          >
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5 font-mono text-xs">
+              <div className="p-3.5 bg-accent-red/10 border border-accent-red/30 rounded-xl space-y-2 flex flex-col justify-between">
+                <div className="flex items-center gap-1.5 text-accent-red font-bold">
+                  <ShieldAlert className="w-4 h-4 shrink-0" />
+                  <span className="tracking-wide">RED ZONE (CRITICAL)</span>
+                </div>
+                <p className="text-[11px] font-sans text-text-dim leading-relaxed">
+                  Zero-tolerance perimeter line. Any movement immediately escalates threat alarms, captures high-rate snapshots, and dispatches rapid response.
+                </p>
+                <div className="pt-2 border-t border-accent-red/20 flex items-center justify-between text-[10px] text-accent-red uppercase tracking-wider font-semibold">
+                  <span>TIER 1</span>
+                  <span>ZERO TOLERANCE</span>
+                </div>
+              </div>
+
+              <div className="p-3.5 bg-accent-yellow/10 border border-accent-yellow/30 rounded-xl space-y-2 flex flex-col justify-between">
+                <div className="flex items-center gap-1.5 text-accent-yellow font-bold">
+                  <Compass className="w-4 h-4 shrink-0" />
+                  <span className="tracking-wide">YELLOW ZONE (CAUTION)</span>
+                </div>
+                <p className="text-[11px] font-sans text-text-dim leading-relaxed">
+                  Direction-sensitive perimeter buffer. Trajectory vectors toward border trigger caution alerts, while verified outward movement remains logged.
+                </p>
+                <div className="pt-2 border-t border-accent-yellow/20 flex items-center justify-between text-[10px] text-accent-yellow uppercase tracking-wider font-semibold">
+                  <span>TIER 2</span>
+                  <span>VECTOR AWARE</span>
+                </div>
+              </div>
+
+              <div className="p-3.5 bg-accent-green/10 border border-accent-green/30 rounded-xl space-y-2 flex flex-col justify-between">
+                <div className="flex items-center gap-1.5 text-accent-green font-bold">
+                  <Shield className="w-4 h-4 shrink-0" />
+                  <span className="tracking-wide">GREEN ZONE (NORMAL)</span>
+                </div>
+                <p className="text-[11px] font-sans text-text-dim leading-relaxed">
+                  Authorized access and patrol corridors. Logs background activity during standard hours; automatically escalates to <strong>Yellow</strong> during curfew (21:00–05:00).
+                </p>
+                <div className="pt-2 border-t border-accent-green/20 flex items-center justify-between text-[10px] text-accent-green uppercase tracking-wider font-semibold">
+                  <span>TIER 3</span>
+                  <span>CURFEW AWARE</span>
+                </div>
+              </div>
+            </div>
+          </Card>
         </div>
 
-        {/* Right Column: Zone List Panel & Tier Rules Legend (4 Cols) */}
+        {/* Right Column: Zone List Panel (4 Cols) */}
         <div className="lg:col-span-4 space-y-5">
           {/* Active Camera Zones List Panel */}
           <Card
@@ -323,7 +508,7 @@ export const ZonesPage: React.FC = () => {
             subtitle={`Defined perimeter boundaries for ${selectedCamera.toUpperCase()}`}
             variant="default"
           >
-            <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1">
+            <div className="space-y-2.5 max-h-[580px] overflow-y-auto pr-1">
               {cameraZones.length > 0 ? (
                 cameraZones.map((zone) => {
                   const isSelected = selectedZoneId === zone.id;
@@ -340,10 +525,10 @@ export const ZonesPage: React.FC = () => {
                       onClick={() =>
                         setSelectedZoneId(isSelected ? null : zone.id)
                       }
-                      className={`p-3 rounded-sm border bg-bg-surface hover:bg-bg-elevated/70 transition-all cursor-pointer border-l-4 ${borderTierColor} ${
+                      className={`p-3.5 rounded-xl border bg-black/60 hover:bg-white/[0.04] transition-all cursor-pointer border-l-4 ${borderTierColor} shadow-md ${
                         isSelected
-                          ? 'border-accent-teal/50 ring-1 ring-accent-teal/40 bg-bg-elevated'
-                          : 'border-border-subtle'
+                          ? 'border-accent-teal/70 ring-2 ring-accent-teal/40 bg-accent-teal/10 shadow-[0_0_15px_rgba(0,240,255,0.15)]'
+                          : 'border-white/10'
                       }`}
                     >
                       <div className="flex items-center justify-between mb-1">
@@ -391,132 +576,114 @@ export const ZonesPage: React.FC = () => {
                   );
                 })
               ) : (
-                <div className="p-6 border border-dashed border-border-subtle rounded-sm text-center">
-                  <Layers className="w-6 h-6 text-text-muted mx-auto mb-2" />
-                  <span className="font-mono text-xs text-text-dim block">
-                    No Zones Configured
-                  </span>
-                  <span className="text-[11px] text-text-muted block mt-1">
-                    Click "Draw New Zone" above to define an alert polygon.
-                  </span>
+                <div className="p-4 rounded-xl border border-accent-yellow/30 bg-accent-yellow/5 space-y-3.5">
+                  <div className="flex items-start gap-2.5">
+                    <div className="p-2 rounded-lg bg-accent-yellow/15 text-accent-yellow border border-accent-yellow/30 shrink-0 mt-0.5">
+                      <Shield className="w-5 h-5" />
+                    </div>
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-bold text-accent-yellow uppercase tracking-wide">
+                          Autonomous Fallback Active
+                        </span>
+                        <span className="w-2 h-2 rounded-full bg-accent-yellow animate-pulse" />
+                      </div>
+                      <p className="text-[11px] text-text-dim leading-relaxed font-sans">
+                        Manual zones are <strong>optional</strong>. With 0 configured zones, the autonomous AI matrix monitors this camera automatically:
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="p-3 bg-black/60 rounded-xl border border-white/10 space-y-2 font-mono text-[11px]">
+                    <div className="flex items-center justify-between text-text-dim">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-accent-yellow" />
+                        Daylight (05:00 - 21:00)
+                      </span>
+                      <span className="text-accent-yellow font-bold">Caution (Tier 2)</span>
+                    </div>
+                    <div className="flex items-center justify-between text-text-dim">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-accent-red" />
+                        Curfew (21:00 - 05:00)
+                      </span>
+                      <span className="text-accent-red font-bold">Critical (Tier 1)</span>
+                    </div>
+                    <div className="flex items-center justify-between text-text-dim">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-1.5 h-1.5 rounded-full bg-accent-red" />
+                        Rapid Approach / Sprint
+                      </span>
+                      <span className="text-accent-red font-bold">Instant Escalation</span>
+                    </div>
+                  </div>
+
+                  {/* 1-Click Zone Setup Options */}
+                  <div className="space-y-2 pt-1 border-t border-white/10">
+                    <span className="text-[10px] font-mono text-text-muted uppercase tracking-wider block font-bold">
+                      1-Click Zone Setup (Optional):
+                    </span>
+                    <div className="grid grid-cols-1 gap-2">
+                      <button
+                        onClick={() => handleApplyPreset(ZONE_PRESETS[0], true)}
+                        className="w-full px-3 py-2 rounded-lg bg-accent-teal/15 hover:bg-accent-teal/25 text-accent-teal border border-accent-teal/30 text-xs font-mono font-semibold flex items-center justify-between transition-all group"
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <Sparkles className="w-3.5 h-3.5 group-hover:rotate-12 transition-transform" />
+                          Apply 3-Tier Horizon
+                        </span>
+                        <span className="text-[10px] bg-accent-teal/20 px-1.5 py-0.5 rounded">3 Zones</span>
+                      </button>
+
+                      <button
+                        onClick={() => handleApplyPreset(ZONE_PRESETS[1], true)}
+                        className="w-full px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-text-dim hover:text-white border border-white/10 text-xs font-mono font-semibold flex items-center justify-between transition-all"
+                      >
+                        <span className="flex items-center gap-1.5">
+                          <Layers className="w-3.5 h-3.5" />
+                          Apply Gate Funnel
+                        </span>
+                        <span className="text-[10px] bg-white/10 px-1.5 py-0.5 rounded">4 Zones</span>
+                      </button>
+
+                      {otherCamerasWithZones.length > 0 && (
+                        <button
+                          onClick={() => handleCopyFromCamera(otherCamerasWithZones[0])}
+                          className="w-full px-3 py-2 rounded-lg bg-white/[0.05] hover:bg-white/[0.1] text-text-dim hover:text-white border border-white/10 text-xs font-mono font-semibold flex items-center justify-between transition-all"
+                        >
+                          <span className="flex items-center gap-1.5">
+                            <Copy className="w-3.5 h-3.5" />
+                            Copy Zones from {otherCamerasWithZones[0].toUpperCase()}
+                          </span>
+                          <span className="text-[10px] bg-white/10 px-1.5 py-0.5 rounded">Mirror</span>
+                        </button>
+                      )}
+
+                      <button
+                        onClick={() => setIsDrawing(true)}
+                        className="w-full px-3 py-2 rounded-lg bg-white/[0.03] hover:bg-white/[0.08] text-text-muted hover:text-text-primary border border-white/10 text-xs font-mono flex items-center justify-center gap-1.5 transition-all"
+                      >
+                        <Pencil className="w-3 h-3" />
+                        <span>Draw Custom Polygon</span>
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
-          </Card>
 
-          {/* Operational Tier Rule Legend */}
-          <Card
-            title="Border Tier Rules & Logic"
-            subtitle="Autonomous threat scoring behavior"
-            variant="default"
-          >
-            <div className="space-y-2.5 font-mono text-xs">
-              <div className="p-2.5 bg-accent-red/10 border border-accent-red/30 rounded-sm space-y-1">
-                <div className="flex items-center gap-1.5 text-accent-red font-bold">
-                  <ShieldAlert className="w-3.5 h-3.5" />
-                  <span>RED ZONE (CRITICAL TIER 1)</span>
-                </div>
-                <p className="text-[11px] font-sans text-text-dim leading-relaxed">
-                  Zero-tolerance intrusion perimeter. Any movement instantly triggers continuous alarms, snapshot bursts, and intercept dispatch.
-                </p>
+            {/* Bottom Quick Clone Action if camera has zones */}
+            {cameraZones.length > 0 && (
+              <div className="pt-3 border-t border-white/10">
+                <button
+                  onClick={handleOpenCloneModal}
+                  className="w-full py-2 px-3 rounded-lg bg-white/[0.04] hover:bg-accent-teal/15 text-text-dim hover:text-accent-teal border border-white/10 hover:border-accent-teal/30 transition-all font-mono text-xs flex items-center justify-center gap-1.5 font-semibold"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  <span>Clone {cameraZones.length} Zones to Other Cameras</span>
+                </button>
               </div>
-
-              <div className="p-2.5 bg-accent-yellow/10 border border-accent-yellow/30 rounded-sm space-y-1">
-                <div className="flex items-center gap-1.5 text-accent-yellow font-bold">
-                  <Compass className="w-3.5 h-3.5" />
-                  <span>YELLOW ZONE (CAUTION TIER 2)</span>
-                </div>
-                <p className="text-[11px] font-sans text-text-dim leading-relaxed">
-                  Direction-sensitive buffer zone. Evaluates trajectory kinematics: <strong>Inward</strong> breaches trigger caution alerts; outward movements remain logged.
-                </p>
-              </div>
-
-              <div className="p-2.5 bg-accent-green/10 border border-accent-green/30 rounded-sm space-y-1">
-                <div className="flex items-center gap-1.5 text-accent-green font-bold">
-                  <Shield className="w-3.5 h-3.5" />
-                  <span>GREEN ZONE (NORMAL TIER 3)</span>
-                </div>
-                <p className="text-[11px] font-sans text-text-dim leading-relaxed">
-                  Authorized access corridors. Silently logs telemetry during daylight, automatically re-tiered to <strong>Yellow</strong> during curfew hours (21:00–05:00).
-                </p>
-              </div>
-            </div>
-          </Card>
-
-          {/* Section 20 Roadmap: Behaviour Anomaly Detection & Virtual Tripwires */}
-          <Card
-            title={
-              <div className="flex items-center justify-between w-full">
-                <span className="font-semibold text-sm flex items-center gap-1.5">
-                  <Zap className="w-4 h-4 text-accent-teal" />
-                  <span>Behaviour Anomaly Engine</span>
-                </span>
-                <Badge variant="teal" size="sm">
-                  SEC 20 ROADMAP
-                </Badge>
-              </div>
-            }
-            subtitle="Kinematic behaviour analysis & virtual tripwire beams"
-            variant="default"
-          >
-            <div className="space-y-3 font-mono text-xs">
-              <div className="p-2.5 rounded bg-bg-surface border border-border-subtle space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-text-primary font-bold flex items-center gap-1.5">
-                    <Zap className="w-3.5 h-3.5 text-accent-red" /> Virtual Tripwire Beam
-                  </span>
-                  <Badge variant={tripwireBreachCount > 0 ? 'red' : 'green'} size="sm">
-                    {tripwireBreachCount > 0 ? `${tripwireBreachCount} BREACHES` : 'ARMED / SECURE'}
-                  </Badge>
-                </div>
-                <p className="text-[11px] font-sans text-text-dim">
-                  Zero-tolerance crossing threshold across perimeter fence line.
-                </p>
-                <div className="pt-1 flex items-center justify-between">
-                  <button
-                    onClick={() => {
-                      setTripwireBreachCount((c) => c + 1);
-                      showToast('⚠ Virtual Tripwire Beam Breached! Alarm Escalated to Red.');
-                    }}
-                    className="px-2 py-1 text-[11px] rounded bg-accent-red/15 hover:bg-accent-red/25 border border-accent-red/30 text-accent-red font-semibold transition-colors"
-                  >
-                    Simulate Beam Breach
-                  </button>
-                  {tripwireBreachCount > 0 && (
-                    <button
-                      onClick={() => setTripwireBreachCount(0)}
-                      className="text-[10px] text-text-muted hover:text-text-primary underline"
-                    >
-                      Reset Counter
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              <div className="p-2.5 rounded bg-bg-surface border border-border-subtle space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="text-text-primary font-bold flex items-center gap-1.5">
-                    <Clock className="w-3.5 h-3.5 text-accent-yellow" /> Loitering Watchdog
-                  </span>
-                  <Badge variant="yellow" size="sm">45s DWELL LIMIT</Badge>
-                </div>
-                <p className="text-[11px] font-sans text-text-dim">
-                  Dwell time tracker flags stationary targets remaining in buffer zone without crossing.
-                </p>
-              </div>
-
-              <div className="p-2.5 rounded bg-bg-surface border border-border-subtle space-y-1">
-                <div className="flex items-center justify-between">
-                  <span className="text-text-primary font-bold flex items-center gap-1.5">
-                    <Activity className="w-3.5 h-3.5 text-accent-purple" /> Fence Climbing Detector
-                  </span>
-                  <Badge variant="purple" size="sm">ASPECT RATIO ON</Badge>
-                </div>
-                <p className="text-[11px] font-sans text-text-dim">
-                  Monitors vertical bounding-box elongation & elevation shifts over fence barrier.
-                </p>
-              </div>
-            </div>
+            )}
           </Card>
         </div>
       </div>
@@ -681,59 +848,6 @@ export const ZonesPage: React.FC = () => {
               </div>
             </div>
           )}
-
-          {/* Behaviour Anomaly Configuration (Section 20 Roadmap) */}
-          <div className="p-3 bg-bg-elevated border border-border-subtle rounded-sm space-y-3 font-mono text-xs">
-            <span className="font-bold text-text-primary uppercase tracking-wider block">
-              Advanced Behaviour Triggers (Section 20)
-            </span>
-            <div className="space-y-2 text-[11px]">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={formTripwire}
-                  onChange={(e) => setFormTripwire(e.target.checked)}
-                  className="w-3.5 h-3.5 accent-accent-teal rounded"
-                />
-                <span className="text-text-primary font-medium">Virtual Tripwire Beam</span>
-                <span className="text-text-muted">(Instant escalation upon crossing)</span>
-              </label>
-
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={formClimbing}
-                  onChange={(e) => setFormClimbing(e.target.checked)}
-                  className="w-3.5 h-3.5 accent-accent-teal rounded"
-                />
-                <span className="text-text-primary font-medium">Fence Climbing Anomaly</span>
-                <span className="text-text-muted">(Monitors vertical bbox shift)</span>
-              </label>
-
-              <div className="space-y-1 pt-1">
-                <div className="flex items-center justify-between text-text-dim">
-                  <span>Loitering Dwell Limit:</span>
-                  <span className="text-accent-yellow font-bold">
-                    {formLoitering > 0 ? `${formLoitering}s` : 'Disabled'}
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min="0"
-                  max="120"
-                  step="15"
-                  value={formLoitering}
-                  onChange={(e) => setFormLoitering(Number(e.target.value))}
-                  className="w-full accent-accent-yellow cursor-pointer"
-                />
-                <div className="flex justify-between text-[9px] text-text-muted">
-                  <span>0 (Off)</span>
-                  <span>45s (Standard)</span>
-                  <span>120s (Extended)</span>
-                </div>
-              </div>
-            </div>
-          </div>
         </form>
       </Modal>
 
@@ -793,6 +907,130 @@ export const ZonesPage: React.FC = () => {
           <span>
             This action will delete all {cameraZones.length} zones defined on {selectedCamera.toUpperCase()}. You will need to redraw or reload them.
           </span>
+        </div>
+      </Modal>
+
+      {/* CLONE TO OTHER CAMERAS MODAL */}
+      <Modal
+        isOpen={isCloneModalOpen}
+        onClose={() => setIsCloneModalOpen(false)}
+        title={
+          <div className="flex items-center gap-2">
+            <Copy className="w-4 h-4 text-accent-yellow" />
+            <span>Clone Zones Across Cameras</span>
+          </div>
+        }
+        description={`Duplicate ${cameraZones.length} configured zone(s) from ${selectedCamera.toUpperCase()} to other sector cameras.`}
+        size="md"
+        footer={
+          <div className="flex items-center justify-between w-full">
+            <span className="text-xs font-mono text-text-dim">
+              {selectedCloneTargets.length} camera(s) selected
+            </span>
+            <div className="flex items-center gap-2">
+              <Button variant="ghost" size="sm" onClick={() => setIsCloneModalOpen(false)}>
+                Cancel
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={selectedCloneTargets.length === 0}
+                leftIcon={<Copy className="w-3.5 h-3.5" />}
+                onClick={handleConfirmClone}
+              >
+                Clone to {selectedCloneTargets.length} Camera(s)
+              </Button>
+            </div>
+          </div>
+        }
+      >
+        <div className="space-y-4 font-mono text-xs">
+          <div className="p-3 bg-white/[0.03] border border-white/10 rounded-xl space-y-1">
+            <span className="text-text-muted text-[10px] block uppercase">Source Camera</span>
+            <div className="flex items-center justify-between">
+              <span className="text-white font-bold">{selectedCamera.toUpperCase()}</span>
+              <Badge variant="teal" size="sm">
+                {cameraZones.length} ZONES
+              </Badge>
+            </div>
+          </div>
+
+          <div className="space-y-2">
+            <div className="flex items-center justify-between">
+              <span className="text-text-dim uppercase text-[11px] font-bold">
+                Select Destination Cameras:
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  const others = availableCameras.filter((c) => c !== selectedCamera);
+                  if (selectedCloneTargets.length === others.length) {
+                    setSelectedCloneTargets([]);
+                  } else {
+                    setSelectedCloneTargets(others);
+                  }
+                }}
+                className="text-accent-teal hover:underline text-[11px]"
+              >
+                {selectedCloneTargets.length === availableCameras.filter((c) => c !== selectedCamera).length
+                  ? 'Deselect All'
+                  : 'Select All'}
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              {availableCameras
+                .filter((c) => c !== selectedCamera)
+                .map((cam) => {
+                  const isChecked = selectedCloneTargets.includes(cam);
+                  const existingCount = allZones.filter((z) => z.cameraName === cam).length;
+                  return (
+                    <label
+                      key={cam}
+                      className={`flex items-center justify-between p-3 rounded-xl border cursor-pointer transition-all ${
+                        isChecked
+                          ? 'bg-accent-teal/15 border-accent-teal text-white'
+                          : 'bg-black/50 border-white/10 text-text-dim hover:border-white/20'
+                      }`}
+                    >
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedCloneTargets((prev) => [...prev, cam]);
+                            } else {
+                              setSelectedCloneTargets((prev) => prev.filter((c) => c !== cam));
+                            }
+                          }}
+                          className="w-4 h-4 rounded accent-accent-teal"
+                        />
+                        <span className="font-bold">{cam.toUpperCase()}</span>
+                      </div>
+                      <span className="text-[10px] text-text-muted">
+                        ({existingCount} existing)
+                      </span>
+                    </label>
+                  );
+                })}
+            </div>
+          </div>
+
+          <div className="pt-2 border-t border-white/10">
+            <label className="flex items-center gap-2 cursor-pointer text-[11px] text-text-dim">
+              <input
+                type="checkbox"
+                checked={cloneOverwrite}
+                onChange={(e) => setCloneOverwrite(e.target.checked)}
+                className="w-3.5 h-3.5 accent-accent-teal rounded"
+              />
+              <span>Overwrite existing zones on destination cameras</span>
+            </label>
+            <p className="text-[10px] text-text-muted pl-5 mt-0.5 font-sans">
+              If checked, replaces target cameras' zones with source zones. If unchecked, appends to them.
+            </p>
+          </div>
         </div>
       </Modal>
     </div>
