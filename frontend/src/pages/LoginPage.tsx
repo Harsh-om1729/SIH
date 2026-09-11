@@ -23,6 +23,8 @@ export const LoginPage: React.FC = () => {
 
   const from = (location.state as { from?: { pathname: string } })?.from?.pathname || '/';
 
+  // The password field below is not read by anything: there is no auth
+  // endpoint to check it against. This selects a display role only.
   const handleManualLogin = (e: React.FormEvent) => {
     e.preventDefault();
     if (!email.trim()) {
@@ -93,6 +95,15 @@ export const LoginPage: React.FC = () => {
           </div>
 
           {/* Credentials Form */}
+          <p
+            id="auth-demo-note"
+            className="text-[11px] font-mono leading-relaxed text-accent-yellow/80 border border-accent-yellow/25 bg-accent-yellow/5 rounded-lg px-3 py-2"
+          >
+            Role selector — not authentication. This system has no user store
+            or login endpoint; the password is not checked. API access is
+            guarded by the bearer token in IBVAP_API_TOKEN.
+          </p>
+
           <form onSubmit={handleManualLogin} className="space-y-4">
             {errorMsg && (
               <div className="p-3 rounded-xl bg-accent-red/15 border border-accent-red/40 text-accent-red text-xs font-medium">
@@ -174,6 +185,7 @@ export const LoginPage: React.FC = () => {
                 onChange={(e) => setPassword(e.target.value)}
                 className="w-full px-3.5 py-2.5 text-xs bg-[#0b0b12] border border-white/15 rounded-xl text-white placeholder:text-text-muted focus:outline-none focus:border-accent-teal focus:ring-1 focus:ring-accent-teal shadow-inner transition-all font-mono"
                 placeholder="••••••••••••"
+                aria-describedby="auth-demo-note"
                 required
               />
             </div>

@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Zone, initialMockZones } from '@/lib/mockZones';
+import { zonesApi } from '@/lib/api';
+import { DataSourceBadge } from '@/components/ui/DataSourceBadge';
 import { ZONE_PRESETS, ZonePreset } from '@/lib/zonePresets';
 import { ZoneCanvas } from '@/components/zones';
 import { Badge } from '@/components/ui/Badge';
@@ -43,6 +45,8 @@ const loadStoredZones = (): Zone[] => {
 
 export const ZonesPage: React.FC = () => {
   const [allZones, setAllZones] = useState<Zone[]>(loadStoredZones);
+  const [isMock, setIsMock] = useState(true);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [selectedCamera, setSelectedCamera] = useState<string>('cam0');
   const [selectedZoneId, setSelectedZoneId] = useState<string | null>(null);
   const [isDrawing, setIsDrawing] = useState(false);
@@ -55,6 +59,24 @@ export const ZonesPage: React.FC = () => {
       console.error('Failed to persist zones to storage', e);
     }
   }, [allZones]);
+
+  // Pull the zones the backend actually has. config/zones_<cam>.json is what
+  // ZoneEngine reads at pipeline startup, so it — not localStorage — is the
+  // real store. localStorage stays only as the offline seed.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await zonesApi.getZones({});
+      if (cancelled) return;
+      setIsMock(res.isFallback);
+      if (res.isFallback || !res.data) return;
+      const flat = Object.values(res.data).flat() as Zone[];
+      setAllZones(flat);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Form Modal State (for Creating or Editing Zone Metadata)
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -176,13 +198,32 @@ export const ZonesPage: React.FC = () => {
     showToast(`All zones cleared for ${selectedCamera.toUpperCase()}`);
   };
 
-  const handleSaveZonesProfile = () => {
+  const handleSaveZonesProfile = async () => {
     try {
       localStorage.setItem(ZONES_STORAGE_KEY, JSON.stringify(allZones));
     } catch (e) {
       console.error(e);
     }
-    showToast('Zones saved to tactical storage — persists across navigation');
+
+    // The API groups zones per camera and writes config/zones_<cam>.json in
+    // ZoneEngine's own format. Saving only to localStorage (as this did) left
+    // the pipeline with no zones at all, so no sector/direction/loiter risk
+    // was ever scored and a RED tier could not be reached.
+    const grouped: Record<string, Zone[]> = {};
+    for (const cam of availableCameras) grouped[cam] = [];
+    for (const z of allZones) {
+      (grouped[z.cameraName] ||= []).push(z);
+    }
+
+    const res = await zonesApi.saveZones(grouped);
+    if (res.isFallback) {
+      setSaveError(res.error);
+      showToast('Saved locally only — backend unreachable, pipeline will NOT see these zones');
+      return;
+    }
+    setSaveError(null);
+    setIsMock(false);
+    showToast('Zones written to the backend — restart the pipeline to apply them');
   };
 
   const handleResetDefaults = () => {
@@ -421,8 +462,19 @@ export const ZonesPage: React.FC = () => {
           >
             Save Zones
           </Button>
+
+          <DataSourceBadge isMock={isMock} error={saveError} />
         </div>
       </div>
+
+      {/* Zones live in config/zones_<cam>.json, which the pipeline reads once
+          at startup — there is no live reload channel, so say so rather than
+          letting a saved zone look immediately active. */}
+      {!isMock && (
+        <p className="text-[11px] font-mono text-text-dim">
+          Saved zones apply on the next pipeline start (./run.sh).
+        </p>
+      )}
 
       {/* Main 2-Column Command Workspace */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">

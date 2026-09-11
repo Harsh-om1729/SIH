@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { useSearchParams } from 'react-router-dom';
+import { camerasApi, cameraStreamUrl } from '@/lib/api';
 import { CameraTile } from '@/components/live';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
@@ -115,6 +116,35 @@ export const LiveFeedsPage: React.FC = () => {
   const [searchParams] = useSearchParams();
   const urlCamera = searchParams.get('camera');
 
+  // Replace the seeded demo tiles with whatever the backend actually has on
+  // CAMERA_SOURCES. Guarded on isFallback: safeFetch resolves successfully
+  // with mock data when the API is down, and overwriting real tiles with
+  // that would be worse than leaving the last known list in place.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await camerasApi.getCameras([]);
+      if (cancelled || res.isFallback || !res.data || res.data.length === 0) return;
+      setCameras(
+        res.data.map((c) => ({
+          id: c.id,
+          name: c.name,
+          location: c.location,
+          sector: c.sector,
+          streamUrl: cameraStreamUrl(c.id),
+          fps: c.fps,
+          activity: c.activity,
+          isActive: c.isActive,
+          resolution: c.resolution,
+        }))
+      );
+      setFocusedCameraId(res.data[0].id);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // Automatically sync cameras to localStorage across routes and sessions
   useEffect(() => {
     try {
@@ -139,6 +169,8 @@ export const LiveFeedsPage: React.FC = () => {
   const [newCamId, setNewCamId] = useState(`cam${cameras.length}`);
   const [newCamLocation, setNewCamLocation] = useState('');
   const [newCamSector, setNewCamSector] = useState('North Border Sector');
+  const [sourceType, setSourceType] = useState<'local' | 'rtsp'>('local');
+  const [localCamIndex, setLocalCamIndex] = useState('0');
   const [newCamStreamUrl, setNewCamStreamUrl] = useState('');
   const [formError, setFormError] = useState('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
@@ -154,17 +186,27 @@ export const LiveFeedsPage: React.FC = () => {
   };
 
 
-  const handleRemoveCamera = (camId: string) => {
+  const handleRemoveCamera = async (camId: string) => {
     if (cameras.length <= 1) {
       showToast('Cannot remove last remaining surveillance feed');
       return;
     }
-    const updated = cameras.filter((c) => c.id !== camId);
-    setCameras(updated);
-    if (focusedCameraId === camId) {
-      setFocusedCameraId(updated[0]?.id || 'cam0');
+    
+    try {
+      await camerasApi.deleteCamera(camId);
+      const updated = cameras.filter((c) => c.id !== camId);
+      setCameras(updated);
+      if (focusedCameraId === camId) {
+        setFocusedCameraId(updated[0]?.id || 'cam0');
+      }
+      showToast(`Removed camera channel ${camId.toUpperCase()}`);
+    } catch (err) {
+      // Surface the reason: a delete refused because the camera comes from
+      // CAMERA_SOURCES in .env reads very differently from a network failure.
+      showToast(
+        `Failed to remove camera ${camId}: ${err instanceof Error ? err.message : 'unknown error'}`
+      );
     }
-    showToast(`Removed camera channel ${camId.toUpperCase()}`);
   };
 
   const handleOpenAddModal = () => {
@@ -175,7 +217,7 @@ export const LiveFeedsPage: React.FC = () => {
     setIsAddModalOpen(true);
   };
 
-  const handleAddCameraSubmit = (e: React.FormEvent) => {
+  const handleAddCameraSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanId = newCamId.trim().toLowerCase();
     const cleanLocation = newCamLocation.trim();
@@ -194,27 +236,46 @@ export const LiveFeedsPage: React.FC = () => {
       setFormError('Location or post name is required');
       return;
     }
+    
+    const finalStreamUrl = sourceType === 'local' ? localCamIndex : newCamStreamUrl.trim();
 
     const newCamera: CameraItem = {
       id: cleanId,
       name: cleanId,
       location: cleanLocation,
       sector: newCamSector,
-      streamUrl: newCamStreamUrl.trim() || undefined,
+      streamUrl: finalStreamUrl || undefined,
       fps: '0.0',
       activity: '—',
       isActive: true,
       resolution: '1920x1080',
     };
 
-    const updated = [...cameras, newCamera];
-    setCameras(updated);
-    setIsAddModalOpen(false);
-    showToast(`Camera ${cleanId.toUpperCase()} (${cleanLocation}) added successfully`);
+    try {
+      const res = await camerasApi.addCamera(newCamera);
+      if (!res.isFallback && res.data) {
+        newCamera.id = res.data.id || newCamera.id;
+        // finalStreamUrl is what the BACKEND needs to open the device (a
+        // device index like "0", or an rtsp:// URL). What the tile needs is
+        // the MJPEG endpoint. Leaving the former here renders <img src="0">,
+        // i.e. a broken image on the freshly added camera.
+        newCamera.streamUrl = cameraStreamUrl(newCamera.id);
+      }
+      const updated = [...cameras, newCamera];
+      setCameras(updated);
+      setIsAddModalOpen(false);
+      showToast(`Camera ${cleanId.toUpperCase()} (${cleanLocation}) added successfully`);
+    } catch (err) {
+      setFormError(
+        `Failed to integrate camera with the backend API: ${
+          err instanceof Error ? err.message : 'unknown error'
+        }`
+      );
+    }
   };
 
   // Quick batch add preset: adds 2 tactical outpost cameras at once
-  const handleBatchAddPreset = () => {
+  const handleBatchAddPreset = async () => {
     const nextIdx = cameras.length;
     const batch: CameraItem[] = [
       {
@@ -239,9 +300,18 @@ export const LiveFeedsPage: React.FC = () => {
       },
     ];
 
-    setCameras((prev) => [...prev, ...batch]);
-    setIsAddModalOpen(false);
-    showToast(`Batch added 2 outpost cameras: ${batch[0].id}, ${batch[1].id}`);
+    try {
+      for (const cam of batch) {
+        await camerasApi.addCamera(cam);
+      }
+      setCameras((prev) => [...prev, ...batch]);
+      setIsAddModalOpen(false);
+      showToast(`Batch added 2 outpost cameras: ${batch[0].id}, ${batch[1].id}`);
+    } catch (err) {
+      showToast(
+        `Failed to integrate batch cameras: ${err instanceof Error ? err.message : 'unknown error'}`
+      );
+    }
   };
 
   const focusedCamera =
@@ -607,19 +677,60 @@ export const LiveFeedsPage: React.FC = () => {
             />
           </div>
 
-          <div>
-            <label className="block text-xs font-mono uppercase text-text-dim mb-1">
-              RTSP / Stream URL (Optional)
-            </label>
-            <input
-              type="text"
-              value={newCamStreamUrl}
-              onChange={(e) => setNewCamStreamUrl(e.target.value)}
-              placeholder="rtsp://192.168.1.104:554/h264/ch1/main"
-              className="w-full px-3 py-2 bg-bg-elevated border border-border-subtle rounded-sm text-sm text-text-primary focus:outline-none focus:border-accent-teal font-mono text-xs"
-            />
-            <span className="text-[10px] text-text-muted mt-0.5 block">
-              Leave blank to use default synthetic simulation feed.
+          <div className="grid grid-cols-2 gap-3">
+            <div>
+              <label className="block text-xs font-mono uppercase text-text-dim mb-1">
+                Source Type
+              </label>
+              <select
+                value={sourceType}
+                onChange={(e) => setSourceType(e.target.value as 'local' | 'rtsp')}
+                className="w-full px-3 py-2 bg-bg-elevated border border-border-subtle rounded-sm text-sm text-text-primary focus:outline-none focus:border-accent-teal"
+              >
+                <option value="local">Local USB/Front Camera</option>
+                <option value="rtsp">RTSP / IP Stream</option>
+              </select>
+            </div>
+
+            {sourceType === 'local' ? (
+              <div>
+                <label className="block text-xs font-mono uppercase text-text-dim mb-1">
+                  Device Index
+                </label>
+                <select
+                  value={localCamIndex}
+                  onChange={(e) => setLocalCamIndex(e.target.value)}
+                  className="w-full px-3 py-2 bg-bg-elevated border border-border-subtle rounded-sm text-sm text-text-primary focus:outline-none focus:border-accent-teal font-mono"
+                >
+                  <option value="0">Camera 0 (Default Front)</option>
+                  <option value="1">Camera 1 (External)</option>
+                  <option value="2">Camera 2</option>
+                  <option value="3">Camera 3</option>
+                </select>
+              </div>
+            ) : (
+              <div>
+                <label className="block text-xs font-mono uppercase text-text-dim mb-1">
+                  RTSP URL
+                </label>
+                <input
+                  type="text"
+                  value={newCamStreamUrl}
+                  onChange={(e) => setNewCamStreamUrl(e.target.value)}
+                  placeholder="rtsp://192.168.1.104:554/h264/ch1/main"
+                  className="w-full px-3 py-2 bg-bg-elevated border border-border-subtle rounded-sm text-sm text-text-primary focus:outline-none focus:border-accent-teal font-mono text-xs"
+                />
+              </div>
+            )}
+
+            {/* Full-width helper row inside the same grid: it was previously
+                emitted after the grid's closing tag, with a stray </div>
+                after it, which left two adjacent JSX roots and failed to
+                parse. col-span-2 keeps it spanning both columns. */}
+            <span className="text-[10px] text-text-muted mt-0.5 block col-span-2">
+              {sourceType === 'local'
+                ? 'Select the hardware device index of the local camera.'
+                : 'Enter the RTSP link for the IP camera.'}
             </span>
           </div>
         </form>

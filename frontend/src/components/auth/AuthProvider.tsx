@@ -53,6 +53,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     } catch {
       // ignore JSON parse error
     }
+    // NOTE: falling back to a signed-in commander means RequireAuth never
+    // actually blocks anyone and /login is unreachable in normal use. That is
+    // deliberate for the demo, but it is NOT authentication: there is no user
+    // store and no login endpoint in this system. What actually guards the
+    // data is IBVAP_API_TOKEN on the API — see integration/api.py.
     return DEFAULT_COMMANDER;
   });
 

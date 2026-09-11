@@ -21,6 +21,9 @@ import {
   AlertCircle,
 } from 'lucide-react';
 
+import { watchlistApi } from '@/lib/api';
+import { DataSourceBadge } from '@/components/ui/DataSourceBadge';
+
 const WATCHLIST_STORAGE_KEY = 'ibvap_watchlist_data';
 
 const loadStoredWatchlist = (): WatchlistPerson[] => {
@@ -40,6 +43,8 @@ const loadStoredWatchlist = (): WatchlistPerson[] => {
 
 export const WatchlistPage: React.FC = () => {
   const [watchlist, setWatchlist] = useState<WatchlistPerson[]>(loadStoredWatchlist);
+  const [isMock, setIsMock] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
@@ -53,6 +58,22 @@ export const WatchlistPage: React.FC = () => {
   // Delete Confirmation Modal State
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [personToDelete, setPersonToDelete] = useState<WatchlistPerson | null>(null);
+
+  // watchlist.db is the real store — it holds the face embeddings the
+  // pipeline matches against. localStorage is only the offline seed.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await watchlistApi.getWatchlist();
+      if (cancelled) return;
+      setIsMock(res.isFallback);
+      setLoadError(res.error);
+      if (!res.isFallback && res.data) setWatchlist(res.data);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // Sync to localStorage
   useEffect(() => {
@@ -91,9 +112,16 @@ export const WatchlistPage: React.FC = () => {
     const file = e.target.files?.[0];
     if (file) {
       try {
-        const objectUrl = URL.createObjectURL(file);
-        setPreviewPhotoUrl(objectUrl);
-        setFormError('');
+        // readAsDataURL, not createObjectURL: a blob: URL is a handle that
+        // only resolves inside this tab, so the photo could never reach the
+        // backend and no embedding could be computed from it.
+        const reader = new FileReader();
+        reader.onload = () => {
+          setPreviewPhotoUrl(String(reader.result));
+          setFormError('');
+        };
+        reader.onerror = () => setFormError('Could not read that image file.');
+        reader.readAsDataURL(file);
       } catch (err) {
         console.error('Failed to create object URL', err);
       }
@@ -117,7 +145,7 @@ export const WatchlistPage: React.FC = () => {
   };
 
   // Submit Add Person
-  const handleAddPersonSubmit = (e: React.FormEvent) => {
+  const handleAddPersonSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!formName.trim()) {
       setFormError('Full name is required for biometric indexing');
@@ -128,7 +156,7 @@ export const WatchlistPage: React.FC = () => {
       return;
     }
 
-    const newPerson: WatchlistPerson = {
+    const draft: WatchlistPerson = {
       id: Date.now(),
       name: formName.trim(),
       notes: formNotes.trim() || 'No intelligence notes logged.',
@@ -138,9 +166,23 @@ export const WatchlistPage: React.FC = () => {
       matchCount: 0,
     };
 
-    setWatchlist((prev) => [newPerson, ...prev]);
+    // The backend runs InsightFace over the photo and stores the embedding;
+    // the id it returns is the watchlist.db row id. Adding to local state
+    // without this (as before) produced a subject that looked enrolled but
+    // had no embedding, so the pipeline could never match them.
+    const res = await watchlistApi.enrollPerson({ ...draft, photoData: previewPhotoUrl } as WatchlistPerson);
+    if (res.isFallback) {
+      setFormError(
+        res.error?.includes('422')
+          ? 'No face detected in that photo — try a clearer, more frontal image.'
+          : `Enrolment failed: ${res.error ?? 'backend unreachable'}`
+      );
+      return;
+    }
+
+    setWatchlist((prev) => [{ ...draft, ...(res.data ?? {}), photoUrl: previewPhotoUrl }, ...prev]);
     setIsAddModalOpen(false);
-    showToast(`Subject "${newPerson.name}" enrolled into biometric database`);
+    showToast(`Subject "${draft.name}" enrolled — embedding stored in watchlist.db`);
   };
 
   // Open Delete Confirmation Modal
@@ -149,10 +191,17 @@ export const WatchlistPage: React.FC = () => {
     setIsDeleteModalOpen(true);
   };
 
-  const handleConfirmDelete = () => {
+  const handleConfirmDelete = async () => {
     if (personToDelete) {
+      const res = await watchlistApi.deletePerson(personToDelete.id);
+      if (res.isFallback) {
+        showToast(`Could not remove "${personToDelete.name}" — backend unreachable`);
+        setIsDeleteModalOpen(false);
+        setPersonToDelete(null);
+        return;
+      }
       setWatchlist((prev) => prev.filter((p) => p.id !== personToDelete.id));
-      showToast(`Subject "${personToDelete.name}" removed from watchlist`);
+      showToast(`Subject "${personToDelete.name}" removed from watchlist.db`);
     }
     setIsDeleteModalOpen(false);
     setPersonToDelete(null);
@@ -162,6 +211,13 @@ export const WatchlistPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-mono uppercase tracking-wider text-text-dim">
+          {watchlist.length} enrolled subject{watchlist.length === 1 ? '' : 's'}
+        </span>
+        <DataSourceBadge isMock={isMock} error={loadError} />
+      </div>
+
       {/* Dynamic Toast Feedback */}
       {toastMessage && (
         <div className="fixed bottom-6 right-6 z-50 flex items-center gap-2 px-4 py-2.5 bg-bg-surface border border-accent-teal/50 rounded-sm shadow-2xl font-mono text-xs text-text-primary animate-in fade-in slide-in-from-bottom-2">

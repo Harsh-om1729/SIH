@@ -1,4 +1,6 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
+import { settingsApi } from '@/lib/api';
+import { DataSourceBadge } from '@/components/ui/DataSourceBadge';
 import {
   loadThresholdSettings,
   saveThresholdSettings,
@@ -42,6 +44,27 @@ export const SettingsPage: React.FC = () => {
 
   // Integrations State
   const [integrations, setIntegrations] = useState<IntegrationSettings>(loadIntegrationSettings);
+  const [isMock, setIsMock] = useState(true);
+  const [apiError, setApiError] = useState<string | null>(null);
+
+  // The backend is the source of truth: these values come from .env plus any
+  // override saved here. localStorage stays the offline seed only.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const res = await settingsApi.getSettings();
+      if (cancelled) return;
+      setIsMock(res.isFallback);
+      setApiError(res.error);
+      if (!res.isFallback && res.data) {
+        setThresholds(res.data.thresholds);
+        setIntegrations(res.data.integrations);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const [integrationSavedMsg, setIntegrationSavedMsg] = useState(false);
 
   // Diagnostic Test State
@@ -74,23 +97,30 @@ export const SettingsPage: React.FC = () => {
   };
 
   // Save Thresholds Handler
-  const handleSaveThresholds = () => {
+  const handleSaveThresholds = async () => {
     saveThresholdSettings(thresholds);
+    const res = await settingsApi.updateThresholds(thresholds);
+    setIsMock(res.isFallback);
+    setApiError(res.error);
     setThresholdSavedMsg(true);
     setTimeout(() => setThresholdSavedMsg(false), 3500);
   };
 
   // Reset Thresholds Handler
-  const handleResetThresholds = () => {
+  const handleResetThresholds = async () => {
     setThresholds(DEFAULT_THRESHOLDS);
     saveThresholdSettings(DEFAULT_THRESHOLDS);
+    await settingsApi.updateThresholds(DEFAULT_THRESHOLDS);
     setThresholdSavedMsg(true);
     setTimeout(() => setThresholdSavedMsg(false), 3500);
   };
 
   // Save Integrations Handler
-  const handleSaveIntegrations = () => {
+  const handleSaveIntegrations = async () => {
     saveIntegrationSettings(integrations);
+    const res = await settingsApi.updateIntegrations(integrations);
+    setIsMock(res.isFallback);
+    setApiError(res.error);
     setIntegrationSavedMsg(true);
     setTimeout(() => setIntegrationSavedMsg(false), 3500);
   };
@@ -140,10 +170,16 @@ export const SettingsPage: React.FC = () => {
           <h2 className="text-xl font-bold text-text-primary flex items-center gap-2">
             <Server className="w-5 h-5 text-accent-teal" />
             <span>Settings & System Health</span>
+            <DataSourceBadge isMock={isMock} error={apiError} />
           </h2>
           <p className="text-xs text-text-dim mt-0.5">
             Hardware telemetry, inference sensitivity tuning, C2 webhooks, and air-gapped compliance
           </p>
+          {!isMock && (
+            <p className="text-[11px] font-mono text-accent-yellow/80 mt-1">
+              Saved values apply on the next pipeline start — app.py reads these at import.
+            </p>
+          )}
         </div>
 
         <div className="flex items-center gap-2">

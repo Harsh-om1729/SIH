@@ -1,6 +1,9 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { mockIncidents } from '@/lib/mockIncidents';
+import { Incident } from '@/lib/mockIncidents';
+import { incidentsApi } from '@/lib/api';
+import { useBackendData } from '@/lib/useBackendData';
+import { DataSourceBadge } from '@/components/ui/DataSourceBadge';
 import { useAlerts } from '@/components/alerts/AlertProvider';
 import {
   getDashboardStats,
@@ -150,7 +153,20 @@ const mockCameras = [
 export const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
   const { alerts, triggerDemoAlert } = useAlerts();
-  const activeAlerts = alerts.length > 0 ? alerts : mockIncidents;
+  const {
+    data: stored,
+    isMock,
+    error,
+  } = useBackendData<Incident[]>(() => incidentsApi.getIncidents(), []);
+
+  // Same merge as IncidentsPage: WebSocket alerts are already rows in the
+  // database, so key by id instead of stacking them on top of the fetch.
+  const activeAlerts = React.useMemo(() => {
+    const byId = new Map<number, Incident>();
+    for (const i of stored) byId.set(i.id, i);
+    for (const a of alerts) byId.set(a.id, a);
+    return Array.from(byId.values()).sort((a, b) => b.id - a.id);
+  }, [stored, alerts]);
 
   // Chart view mode state: 'realtime' (stream per alert) or '24h' (hourly trend)
   const [chartMode, setChartMode] = useState<'realtime' | '24h'>('realtime');
@@ -184,6 +200,7 @@ export const DashboardPage: React.FC = () => {
         <div>
           <h2 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             <span>Surveillance Overview</span>
+            <DataSourceBadge isMock={isMock} error={error} />
             <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#101624] text-accent-teal border border-accent-teal/30">
               LIVE TELEMETRY
             </span>

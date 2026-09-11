@@ -1,5 +1,8 @@
 import React from 'react';
-import { mockIncidents } from '@/lib/mockIncidents';
+import { Incident } from '@/lib/mockIncidents';
+import { incidentsApi } from '@/lib/api';
+import { useBackendData } from '@/lib/useBackendData';
+import { DataSourceBadge } from '@/components/ui/DataSourceBadge';
 import {
   getCategoryDistribution,
   getCameraDistribution,
@@ -56,10 +59,18 @@ const CustomAnalyticsTooltip = ({ active, payload, label }: any) => {
 };
 
 export const AnalyticsPage: React.FC = () => {
-  const categoryData = getCategoryDistribution(mockIncidents);
-  const cameraData = getCameraDistribution(mockIncidents);
-  const tierData = getTierDistribution(mockIncidents);
-  const hourlyActivity = getPeakHourlyActivity(mockIncidents);
+  // Charts are computed from whatever the backend returns, so every bar here
+  // reflects real recorded incidents rather than the sample set.
+  const {
+    data: incidents,
+    isMock,
+    error,
+  } = useBackendData<Incident[]>(() => incidentsApi.getIncidents(), []);
+
+  const categoryData = getCategoryDistribution(incidents);
+  const cameraData = getCameraDistribution(incidents);
+  const tierData = getTierDistribution(incidents);
+  const hourlyActivity = getPeakHourlyActivity(incidents);
 
   return (
     <div className="space-y-6">
@@ -69,6 +80,7 @@ export const AnalyticsPage: React.FC = () => {
           <h2 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             <BarChart3 className="w-5 h-5 text-accent-teal" />
             <span>Threat Intelligence Analytics</span>
+            <DataSourceBadge isMock={isMock} error={error} />
           </h2>
           <p className="text-xs text-text-dim">
             Deep multi-dimensional breakdown of border activity, sector distributions, and curfew patterns

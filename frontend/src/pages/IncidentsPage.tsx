@@ -1,6 +1,9 @@
 import React, { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Incident, mockIncidents } from '@/lib/mockIncidents';
+import { Incident } from '@/lib/mockIncidents';
+import { incidentsApi } from '@/lib/api';
+import { useBackendData } from '@/lib/useBackendData';
+import { DataSourceBadge } from '@/components/ui/DataSourceBadge';
 import { useAlerts } from '@/components/alerts/AlertProvider';
 import {
   Table,
@@ -37,7 +40,22 @@ const CAMERA_LOCATIONS: Record<string, string> = {
 export const IncidentsPage: React.FC = () => {
   const navigate = useNavigate();
   const { alerts } = useAlerts();
-  const incidentsData = alerts.length > 0 ? alerts : mockIncidents;
+
+  // Stored incidents from incidents.db. `alerts` holds what arrived over the
+  // WebSocket since this tab opened; those rows are also in the database, so
+  // merge by id rather than concatenating or a just-fired alert appears twice.
+  const {
+    data: stored,
+    isMock,
+    error,
+  } = useBackendData<Incident[]>(() => incidentsApi.getIncidents(), []);
+
+  const incidentsData = useMemo(() => {
+    const byId = new Map<number, Incident>();
+    for (const i of stored) byId.set(i.id, i);
+    for (const a of alerts) byId.set(a.id, a);
+    return Array.from(byId.values()).sort((a, b) => b.id - a.id);
+  }, [stored, alerts]);
 
   // Filter States - centered around Detection Types (Person, Vehicle, Unknown)
   const [selectedCategory, setSelectedCategory] = useState<'all' | 'person' | 'vehicle' | 'unknown'>('all');
@@ -113,6 +131,15 @@ export const IncidentsPage: React.FC = () => {
 
   return (
     <div className="space-y-6">
+      {/* Where these rows came from. Without it a page served from
+          mockIncidents.ts looks identical to one served from incidents.db. */}
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-mono uppercase tracking-wider text-text-dim">
+          {incidentsData.length} incident{incidentsData.length === 1 ? '' : 's'}
+        </span>
+        <DataSourceBadge isMock={isMock} error={error} />
+      </div>
+
       {/* 1. Category KPI Cards: Person Detect / Vehicle Detect / Unknown Detect */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         {/* Person Detect */}

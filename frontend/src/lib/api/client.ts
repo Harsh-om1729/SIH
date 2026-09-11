@@ -1,5 +1,18 @@
 import { API_CONFIG } from './config';
 
+// The backend fails closed on IBVAP_API_TOKEN (see integration/api.py), so
+// every /api/v1 route except /health needs this header or answers 401.
+//
+// A Vite env var is compiled into the bundle, so this token is readable by
+// anyone who can open the dashboard. That is acceptable only because the
+// dashboard and the API are both meant to sit inside the same trusted
+// network. Do not reuse the operator-facing token here if the API is ever
+// exposed beyond it — issue the browser its own scoped credential instead.
+function authHeaders(): Record<string, string> {
+  const token = import.meta.env.VITE_API_TOKEN as string | undefined;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 export interface ApiResponse<T> {
   data: T | null;
   error: string | null;
@@ -22,6 +35,7 @@ export async function safeFetch<T>(
       headers: {
         'Content-Type': 'application/json',
         Accept: 'application/json',
+        ...authHeaders(),
         ...(options?.headers || {}),
       },
     });
