@@ -70,6 +70,8 @@ class AlertManager:
         confirm_n: int = 2,
         confirm_window: int = 3,
         max_cooldown_seconds: float = 64.0,
+        state_ttl_seconds: float = 300.0,
+        dispatcher=None,
     ):
         if confirm_n > confirm_window:
             raise ValueError(
@@ -85,11 +87,28 @@ class AlertManager:
         self.incident_store = incident_store
         self.webhook = webhook
         self.syslog = syslog
+        # Optional `AlertDispatcher` (alerts/dispatch.py). When set, the slow
+        # side effects — webhook POST, syslog emit, evidence persistence — are
+        # handed to its background worker instead of running on the frame
+        # path. Tier/escalation/cooldown decisions stay synchronous either
+        # way, so alert semantics are identical; only *when* the I/O happens
+        # changes. Left None (the default) everything runs inline exactly as
+        # before, which is what the unit tests rely on.
+        self.dispatcher = dispatcher
         os.makedirs(snapshot_dir, exist_ok=True)
+        # Per-track alert state is keyed by an identity that churns (ByteTrack
+        # mints a new id on every re-acquisition), so keeping it forever means
+        # growing forever. The TTL is floored at the cooldown deliberately:
+        # evicting a track whose cooldown is still running would let it alert
+        # again immediately, so this floor guarantees eviction can never change
+        # rate-limiting behaviour for a track that is still being tracked.
+        self.state_ttl_seconds = max(state_ttl_seconds, cooldown_seconds)
         self._last_tier: dict = {}
         self._last_alert_time: dict = {}
         self._history: dict = {}
         self._repeats: dict = {}
+        self._last_seen: dict = {}
+        self._last_purge: float = self._now()
 
         self._yellow_chime = _synth_tone(880, 0.15, volume=0.25) if _AUDIO_AVAILABLE else None
         self._red_siren = _synth_tone(1200, 0.4, volume=0.5) if _AUDIO_AVAILABLE else None
@@ -107,6 +126,9 @@ class AlertManager:
         label = (
             f"#{det.person_id}" if det.person_id is not None else f"T{det.track_id}"
         )
+        now = self._now()
+        self._last_seen[track_key] = now
+        self._purge_stale(now)
         prev_tier = self._last_tier.get(track_key, "green")
         tier = self._confirmed_tier(track_key, score.tier)
 
@@ -117,7 +139,6 @@ class AlertManager:
             )
             return
 
-        now = self._now()
         escalated = self.TIER_RANK.get(tier, 0) > self.TIER_RANK.get(prev_tier, 0)
         if escalated:
             # A newly confirmed higher tier resets the backoff: this is a
@@ -133,7 +154,7 @@ class AlertManager:
             self._repeats[track_key] = self._repeats.get(track_key, 0) + 1
 
         self._last_alert_time[track_key] = now
-        self._notify_integrations(det, score, track_key, now)
+        self._offload("notify_integrations", self._notify_integrations, det, score, track_key, now)
 
         if tier == "yellow":
             log.info(
@@ -141,7 +162,7 @@ class AlertManager:
                 det.category(), label, score.total, score.breakdown(),
             )
             self._play(self._yellow_chime)
-            self._record_evidence(det, score, recent_frames[-1:])
+            self._offload("record_evidence", self._record_evidence, det, score, recent_frames[-1:])
         elif tier == "red":
             # The breakdown is the whole point of an additive score: a sentry
             # needs to see which component drove a Red, and whether an override
@@ -156,7 +177,47 @@ class AlertManager:
                 det.zone_tier, tier, score.total, now,
             )
             self._play(self._red_siren)
-            self._record_evidence(det, score, recent_frames)
+            self._offload("record_evidence", self._record_evidence, det, score, recent_frames)
+
+    def _offload(self, job_name: str, fn, *args) -> None:
+        """Runs an alert side effect off the frame path when a dispatcher is
+        wired in, inline otherwise.
+
+        A rejected submission (queue full) is already logged and counted by the
+        dispatcher; the alert itself has been logged and rate-limit state
+        recorded before we get here, so the alert is never lost — only this
+        one delivery/persistence attempt is.
+        """
+        if self.dispatcher is None:
+            fn(*args)
+            return
+        self.dispatcher.submit(job_name, fn, *args)
+
+    def _purge_stale(self, now: float) -> None:
+        """Evicts alert state for identities not seen for `state_ttl_seconds`.
+
+        Swept at most once per TTL window rather than on every detection, so
+        the cost stays negligible while the state stays bounded to roughly the
+        identities seen in the last two windows. Only keys that have been
+        absent for a full TTL are dropped, and that TTL is never shorter than
+        the cooldown, so an active track's cooldown/escalation state is never
+        the thing being removed.
+        """
+        if self._last_purge > now:
+            # Wall clock stepped backwards (e.g. an NTP correction) - re-base
+            # rather than never sweeping again.
+            self._last_purge = now
+        if now - self._last_purge < self.state_ttl_seconds:
+            return
+        self._last_purge = now
+
+        stale = [key for key, seen in self._last_seen.items() if now - seen > self.state_ttl_seconds]
+        for key in stale:
+            self._last_seen.pop(key, None)
+            self._last_tier.pop(key, None)
+            self._last_alert_time.pop(key, None)
+        if stale:
+            log.debug("Evicted alert state for %d stale identit(ies)", len(stale))
 
     def _confirmed_tier(self, track_key, observed_tier: str) -> str:
         """N-of-M confirmation on the way up, full-window hysteresis on the way
@@ -193,9 +254,18 @@ class AlertManager:
         return confirmed
 
     def _effective_cooldown(self, track_key) -> float:
-        """Exponential backoff for a track parked at the same confirmed tier."""
+        """Exponential backoff for a track parked at the same confirmed tier.
+
+        The ceiling bounds how far the backoff may *grow*; it must never pull
+        the interval below the configured base. With cooldown_seconds=100 and
+        the default max_cooldown_seconds=64, a plain min() returned 64 — a
+        shorter gap than the operator asked for, so a track re-alerted at 64s
+        on a 100s cooldown. Raising the ceiling to the base keeps backoff
+        monotonic: the first interval is always exactly cooldown_seconds.
+        """
         repeats = self._repeats.get(track_key, 0)
-        return min(self.cooldown_seconds * (2 ** repeats), self.max_cooldown_seconds)
+        ceiling = max(self.max_cooldown_seconds, self.cooldown_seconds)
+        return min(self.cooldown_seconds * (2 ** repeats), ceiling)
 
     def forget(self, track_key) -> None:
         """Drops all per-track state. Callers that retire tracks should use it;

@@ -2,6 +2,12 @@
 so any C2/SIEM system a deploying force already runs can poll this platform
 without needing to know its internals (ONNX/ByteTrack/etc. stay invisible).
 
+Access requires a bearer token (Phase 0B, item 2). The incident feed carries
+operational surveillance data, so it is not served to unauthenticated callers.
+Set the token in the environment before starting the service:
+
+    IBVAP_API_TOKEN=<a long random secret>
+
 Run from ibvap/: uvicorn integration.api:app --port 8000
 Then:           curl -H "Authorization: Bearer $IBVAP_API_TOKEN" \
                      http://localhost:8000/incidents
@@ -72,6 +78,10 @@ from config.settings import (
 )
 import cv2
 
+from fastapi import Depends, FastAPI, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from config.settings import API_TOKEN
 from database.incident_store import IncidentStore
 from integration.live_stream import CameraBusyError, LiveCameraRegistry
 from intelligence.threat_score import GREEN_MAX, YELLOW_MAX
@@ -81,6 +91,8 @@ from intelligence.threat_score import GREEN_MAX, YELLOW_MAX
 # silently — the first two are exactly what you need when a tile stays black.
 configure_logging()
 log = logging.getLogger("ibvap.api")
+
+log = logging.getLogger("ibvap.integration.api")
 
 app = FastAPI(title="IBVAP Integration API")
 
@@ -111,36 +123,52 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
-# auto_error=False so a missing header returns our own 503/401 rather than
-# FastAPI's generic 403, which would hide the "no token configured" case.
+# auto_error=False so a missing header reaches this handler and gets the same
+# generic 401 as a malformed one — the caller learns only that it is
+# unauthorized, never which part of its credential was wrong.
 _bearer = HTTPBearer(auto_error=False)
+
+# One shared instance: every failed-credential path raises exactly this, so no
+# branch can accidentally describe which check failed.
+_UNAUTHORIZED = HTTPException(
+    status_code=status.HTTP_401_UNAUTHORIZED,
+    detail="Unauthorized",
+    headers={"WWW-Authenticate": "Bearer"},
+)
 
 
 def require_token(
     credentials: "HTTPAuthorizationCredentials | None" = Depends(_bearer),
 ) -> None:
     """Fail closed. An unset IBVAP_API_TOKEN is a deployment error, not an
-    invitation — it is reported as 503 so an operator can tell "nobody
-    configured this" apart from "your token is wrong" (401)."""
+    invitation — reported as 503 so an operator can tell "nobody configured
+    this" apart from "your token is wrong" (401). That distinction is made to
+    the *operator*, never to the caller: every credential failure returns the
+    same opaque 401.
+    """
     if not IBVAP_API_TOKEN:
+        # Logged because an operator otherwise has no way to see why every
+        # call 503s. The token value itself is never logged, here or anywhere.
+        log.error(
+            "IBVAP_API_TOKEN is not configured - refusing all API requests. "
+            "Set it in the environment to enable the integration API."
+        )
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="IBVAP_API_TOKEN is not set — the API is refusing all requests.",
+            detail="API authentication is not configured",
         )
-    supplied = credentials.credentials if credentials is not None else ""
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise _UNAUTHORIZED
     # compare_digest, not ==, so a wrong token can't be recovered a character
     # at a time from response timing.
-    if not hmac.compare_digest(supplied, IBVAP_API_TOKEN):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or missing bearer token.",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+    if not hmac.compare_digest(credentials.credentials, IBVAP_API_TOKEN):
+        raise _UNAUTHORIZED
 
 
 # --------------------------------------------------------------------------
 # Legacy flat feed — shape frozen for existing C2/SIEM pollers.
 # --------------------------------------------------------------------------
+
 
 
 @app.get("/status")

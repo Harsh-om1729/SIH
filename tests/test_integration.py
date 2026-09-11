@@ -86,6 +86,9 @@ class TestIncidentAPI(unittest.TestCase):
         def patched_init(self, *args, **kwargs):
             original_init(self, db_path=db_path, evidence_dir=evidence_dir, key_path=key_path)
 
+        # The API requires a bearer token; this test covers the incident
+        # payload, not the auth boundary (see tests/test_api_auth.py), so it
+        # authenticates with a patched token.
         with patch.object(IncidentStore, "__init__", patched_init), \
                 patch.object(api_module, "IBVAP_API_TOKEN", _TEST_TOKEN):
             client = TestClient(api_module.app)

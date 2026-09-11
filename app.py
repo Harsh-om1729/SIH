@@ -34,12 +34,15 @@ import cv2  # noqa: E402
 
 from activity_gate.gate import ActivityGate
 from alerts.alert_manager import AlertManager
+from alerts.dispatch import AlertDispatcher
+from camera.health import CameraErrorIsolator, CameraHealth
 from camera.stream_manager import StreamManager
 from config.settings import (
     ALERT_CONFIRM_N,
     ALERT_CONFIRM_WINDOW,
     ALERT_COOLDOWN_SECONDS,
     ALERT_MAX_COOLDOWN_SECONDS,
+    ALERT_DISPATCH_QUEUE_SIZE,
     BRIGHTNESS_THRESHOLD,
     CAMERA_HEIGHT,
     CAMERA_SOURCES,
@@ -253,6 +256,9 @@ def main() -> None:
     incident_store = IncidentStore()
     webhook = WebhookNotifier(url=WEBHOOK_URL)
     syslog = SyslogNotifier(host=SYSLOG_HOST, port=SYSLOG_PORT)
+    # Webhook POSTs and evidence persistence run on this bounded background
+    # worker so a slow/unreachable C2 host or disk cannot stall the camera loop.
+    alert_dispatcher = AlertDispatcher(maxsize=ALERT_DISPATCH_QUEUE_SIZE)
     alert_manager = AlertManager(
         cooldown_seconds=ALERT_COOLDOWN_SECONDS,
         confirm_n=ALERT_CONFIRM_N,
@@ -261,6 +267,7 @@ def main() -> None:
         incident_store=incident_store,
         webhook=webhook,
         syslog=syslog,
+        dispatcher=alert_dispatcher,
     )
     # Seconds between full pipeline passes while a scene is idle. Guard against
     # a zero/negative setting turning the floor into a division error.
@@ -280,117 +287,149 @@ def main() -> None:
     person_id_cache = {name: {} for name in CAMERA_SOURCES}
     watchlist_cache = {name: {} for name in CAMERA_SOURCES}
 
+    isolator = CameraErrorIsolator()
+    last_health: dict[str, str] = {}
+
+    def process_camera_frame(name: str, frame) -> None:
+        """The full per-camera pipeline for one frame.
+
+        Runs behind `isolator` below, so anything raised in here costs this
+        one frame on this one camera instead of the whole loop.
+
+        The body is the full pipeline — profiler stages, the IDLE_MIN_FPS
+        floor, the Re-ID/face check throttle, loiter dwell and group count.
+        Where the loop used `continue` to skip the rest of a frame, this
+        returns instead.
+        """
+        with profiler.stage("activity_gate"):
+            active, motion_score = gates[name].is_active(frame)
+        frame_counters[name] += 1
+
+        # High activity: run the full pipeline every frame.
+        # Idle: hold a floor of IDLE_MIN_FPS full passes per second, so
+        # a still scene still updates the window and keeps tracks alive.
+        # Timed off the last processed frame rather than a frame count,
+        # because a count makes the idle rate a function of the camera's
+        # own fps — two cameras at different rates idled at different
+        # speeds from one setting.
+        now = time.perf_counter()
+        last_processed = last_frame_time[name]
+        due = last_processed is None or (now - last_processed) >= idle_min_period
+        if not (active or due):
+            # Was `continue` when this body lived inside the camera loop;
+            # inside process_camera_frame the equivalent is returning, which
+            # skips the rest of this frame's pipeline exactly as before.
+            return
+
+        if last_processed is not None:
+            instant_fps = 1.0 / max(now - last_processed, 1e-6)
+            fps_ema[name] = (0.9 * fps_ema[name]) + (0.1 * instant_fps)
+        last_frame_time[name] = now
+
+        preprocessor = preprocessors[name]
+        with profiler.stage("preprocess"):
+            processed = preprocessor.process(frame)
+
+        with profiler.stage("detect_track"):
+            detections = trackers[name].track(processed)
+        with profiler.stage("false_alarm_filter"):
+            detections = false_alarm_filters[name].filter(detections)
+        for det in detections:
+            if det.track_id is not None and det.category() == "person":
+                track_id = det.track_id
+                # A brand-new track is checked every frame (Re-ID
+                # needs consecutive samples to decide an identity at
+                # all — resolve() returns None while still buffering,
+                # so check *value*, not key presence, or a track
+                # stuck buffering would get throttled before it ever
+                # resolves); once resolved, re-checking every Nth
+                # frame is enough — appearance doesn't change frame-to-frame.
+                already_resolved = person_id_cache[name].get(track_id) is not None
+                due_for_check = frame_counters[name] % REID_FACE_CHECK_INTERVAL == 0
+                if not already_resolved or due_for_check:
+                    with profiler.stage("reid_resolve"):
+                        det.person_id = person_gallery.resolve(
+                            (name, track_id), processed, det.box
+                        )
+                    person_id_cache[name][track_id] = det.person_id
+                else:
+                    det.person_id = person_id_cache[name][track_id]
+
+                if not already_resolved or due_for_check:
+                    with profiler.stage("face_embed"):
+                        _face_box, embedding = face_recognizer.embed(processed, det.box)
+                    if embedding is not None:
+                        with profiler.stage("watchlist_match"):
+                            match_name, similarity = watchlist_matcher.match(embedding)
+                        watchlist_cache[name][track_id] = (match_name, similarity)
+                cached_match, cached_similarity = watchlist_cache[name].get(
+                    track_id, (None, 0.0)
+                )
+                det.watchlist_match = cached_match
+                det.watchlist_similarity = cached_similarity
+
+            x1, y1, x2, y2 = det.box
+            ground_point = ((x1 + x2) // 2, y2)
+            with profiler.stage("zone_classify"):
+                zone_result = zone_engines[name].classify(ground_point, det.direction)
+            det.zone_tier = zone_result["tier"]
+            det.zone_direction = zone_result["direction"]
+
+        draw_detections(processed, detections)
+
+        group_count = zone_group_count(detections)
+        scores = []
+        for det in detections:
+            # Dwell is keyed on the Re-ID person_id where we have one,
+            # so standing still behind cover — which makes ByteTrack
+            # churn the track_id — doesn't keep resetting the clock.
+            dwell_key = (
+                ("person", det.person_id) if det.person_id is not None
+                else ("track", det.track_id)
+            )
+            dwell = loiter_trackers[name].update(dwell_key, det.zone_tier)
+            scores.append(
+                draw_threat_score_overlay(
+                    processed, det, threat_scorer, dwell, group_count
+                )
+            )
+
+        with profiler.stage("draw_overlays"):
+            draw_debug_overlay(processed, preprocessor, active, motion_score)
+            draw_fps_overlay(processed, fps_ema[name])
+            zone_drawers[name].draw_overlay(processed)
+
+        with profiler.stage("frame_buffer_copy"):
+            frame_buffers[name].append(processed.copy())
+        with profiler.stage("alert_handle"):
+            for det, score in zip(detections, scores):
+                alert_manager.handle(det, score, list(frame_buffers[name]))
+
+        with profiler.stage("display"):
+            cv2.imshow(window_names[name], processed)
+        profiler.frame_done()
+
     try:
         while True:
+            health = manager.health()
+            if health != last_health:
+                degraded = {n: s for n, s in health.items() if s != CameraHealth.ONLINE}
+                if degraded:
+                    log.warning("Camera health changed — degraded: %s (all: %s)", degraded, health)
+                else:
+                    log.info("Camera health changed — all cameras ONLINE")
+                last_health = health
+
             frames = manager.read_all()
             for name, frame in frames.items():
                 if frame is None:
                     continue
-
-                with profiler.stage("activity_gate"):
-                    active, motion_score = gates[name].is_active(frame)
-                frame_counters[name] += 1
-
-                # High activity: run the full pipeline every frame.
-                # Idle: hold a floor of IDLE_MIN_FPS full passes per second, so
-                # a still scene still updates the window and keeps tracks alive.
-                # Timed off the last processed frame rather than a frame count,
-                # because a count makes the idle rate a function of the camera's
-                # own fps — two cameras at different rates idled at different
-                # speeds from one setting.
-                now = time.perf_counter()
-                last_processed = last_frame_time[name]
-                due = last_processed is None or (now - last_processed) >= idle_min_period
-                if not (active or due):
-                    continue
-
-                if last_processed is not None:
-                    instant_fps = 1.0 / max(now - last_processed, 1e-6)
-                    fps_ema[name] = (0.9 * fps_ema[name]) + (0.1 * instant_fps)
-                last_frame_time[name] = now
-
-                preprocessor = preprocessors[name]
-                with profiler.stage("preprocess"):
-                    processed = preprocessor.process(frame)
-
-                with profiler.stage("detect_track"):
-                    detections = trackers[name].track(processed)
-                with profiler.stage("false_alarm_filter"):
-                    detections = false_alarm_filters[name].filter(detections)
-                for det in detections:
-                    if det.track_id is not None and det.category() == "person":
-                        track_id = det.track_id
-                        # A brand-new track is checked every frame (Re-ID
-                        # needs consecutive samples to decide an identity at
-                        # all — resolve() returns None while still buffering,
-                        # so check *value*, not key presence, or a track
-                        # stuck buffering would get throttled before it ever
-                        # resolves); once resolved, re-checking every Nth
-                        # frame is enough — appearance doesn't change frame-to-frame.
-                        already_resolved = person_id_cache[name].get(track_id) is not None
-                        due_for_check = frame_counters[name] % REID_FACE_CHECK_INTERVAL == 0
-                        if not already_resolved or due_for_check:
-                            with profiler.stage("reid_resolve"):
-                                det.person_id = person_gallery.resolve(
-                                    (name, track_id), processed, det.box
-                                )
-                            person_id_cache[name][track_id] = det.person_id
-                        else:
-                            det.person_id = person_id_cache[name][track_id]
-
-                        if not already_resolved or due_for_check:
-                            with profiler.stage("face_embed"):
-                                _face_box, embedding = face_recognizer.embed(processed, det.box)
-                            if embedding is not None:
-                                with profiler.stage("watchlist_match"):
-                                    match_name, similarity = watchlist_matcher.match(embedding)
-                                watchlist_cache[name][track_id] = (match_name, similarity)
-                        cached_match, cached_similarity = watchlist_cache[name].get(
-                            track_id, (None, 0.0)
-                        )
-                        det.watchlist_match = cached_match
-                        det.watchlist_similarity = cached_similarity
-
-                    x1, y1, x2, y2 = det.box
-                    ground_point = ((x1 + x2) // 2, y2)
-                    with profiler.stage("zone_classify"):
-                        zone_result = zone_engines[name].classify(ground_point, det.direction)
-                    det.zone_tier = zone_result["tier"]
-                    det.zone_direction = zone_result["direction"]
-
-                draw_detections(processed, detections)
-
-                group_count = zone_group_count(detections)
-                scores = []
-                for det in detections:
-                    # Dwell is keyed on the Re-ID person_id where we have one,
-                    # so standing still behind cover — which makes ByteTrack
-                    # churn the track_id — doesn't keep resetting the clock.
-                    dwell_key = (
-                        ("person", det.person_id) if det.person_id is not None
-                        else ("track", det.track_id)
-                    )
-                    dwell = loiter_trackers[name].update(dwell_key, det.zone_tier)
-                    scores.append(
-                        draw_threat_score_overlay(
-                            processed, det, threat_scorer, dwell, group_count
-                        )
-                    )
-
-                with profiler.stage("draw_overlays"):
-                    draw_debug_overlay(processed, preprocessor, active, motion_score)
-                    draw_fps_overlay(processed, fps_ema[name])
-                    zone_drawers[name].draw_overlay(processed)
-
-                with profiler.stage("frame_buffer_copy"):
-                    frame_buffers[name].append(processed.copy())
-                with profiler.stage("alert_handle"):
-                    for det, score in zip(detections, scores):
-                        alert_manager.handle(det, score, list(frame_buffers[name]))
-
-                with profiler.stage("display"):
-                    cv2.imshow(window_names[name], processed)
-                profiler.frame_done()
+                # Per-camera failure boundary: a pipeline exception on one
+                # camera drops that frame, is logged with the camera id and a
+                # traceback, and leaves every other camera still processing.
+                isolator.run(
+                    name, process_camera_frame, name, frame, stage="frame-pipeline"
+                )
 
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
@@ -402,6 +441,8 @@ def main() -> None:
         if report:
             print(report)
         manager.stop_all()
+        # Drain queued webhook/evidence work before closing the stores it uses.
+        alert_dispatcher.stop()
         threat_rules.close()
         incident_store.close()
         watchlist_db.close()

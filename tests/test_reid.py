@@ -255,5 +255,115 @@ class TestCrossCameraReID(unittest.TestCase):
         self.assertEqual(person_on_cam0, person_on_cam1)
 
 
+class TestPendingBufferIsBounded(unittest.TestCase):
+    """Issue D: embeddings buffered for a track that vanishes before reaching
+    min_samples used to stay in `_pending` for the life of the process. Every
+    person who walks past for a frame or two leaves one behind, so on a
+    24/7 border deployment the buffer only ever grows."""
+
+    def _gallery(self, clock, **kwargs):
+        options = dict(
+            embed_fn=fake_embed,
+            similarity_threshold=0.8,
+            ttl_seconds=10.0,
+            min_samples=3,
+            now_fn=lambda: clock["t"],
+        )
+        options.update(kwargs)
+        return PersonGallery(**options)
+
+    def test_track_reaching_min_samples_still_resolves_and_clears_its_buffer(self):
+        clock = {"t": 0.0}
+        gallery = self._gallery(clock)
+        box = (100, 100, 160, 260)
+        frame = make_frame_with_patch((0, 0, 220), box)
+
+        person_id = resolve_until_decided(gallery, 701, frame, box)
+
+        self.assertIsNotNone(person_id)
+        self.assertEqual(gallery._pending, {}, "resolved track left its samples buffered")
+
+    def test_track_that_disappears_before_min_samples_is_eventually_cleaned_up(self):
+        clock = {"t": 0.0}
+        gallery = self._gallery(clock)
+        box = (100, 100, 160, 260)
+        frame = make_frame_with_patch((0, 0, 220), box)
+
+        gallery.resolve(801, frame, box)  # one sample, then the person is gone
+        self.assertIn(801, gallery._pending)
+
+        # Another track appears well after the TTL, driving a purge.
+        clock["t"] = 50.0
+        gallery.resolve(802, frame, box)
+
+        self.assertNotIn(801, gallery._pending, "abandoned buffer was never released")
+
+    def test_cleanup_does_not_touch_a_track_still_collecting_samples(self):
+        clock = {"t": 0.0}
+        gallery = self._gallery(clock, min_samples=5)
+        box = (100, 100, 160, 260)
+        frame = make_frame_with_patch((0, 0, 220), box)
+
+        gallery.resolve(901, frame, box)
+        clock["t"] = 5.0  # inside the TTL - this track is still live
+        gallery.resolve(901, frame, box)
+        clock["t"] = 9.0
+        gallery.resolve(901, frame, box)
+
+        self.assertIn(901, gallery._pending)
+        self.assertEqual(len(gallery._pending[901]["samples"]), 3)
+
+        # It goes on to resolve normally once it has enough samples.
+        clock["t"] = 10.0
+        self.assertIsNone(gallery.resolve(901, frame, box))
+        self.assertIsNotNone(gallery.resolve(901, frame, box))
+
+    def test_many_short_lived_tracks_stay_memory_bounded(self):
+        clock = {"t": 0.0}
+        gallery = self._gallery(clock)
+        box = (100, 100, 160, 260)
+        frame = make_frame_with_patch((0, 0, 220), box)
+
+        # 2000 people glimpsed for a single frame each, one per second.
+        for track_id in range(2000):
+            clock["t"] = float(track_id)
+            gallery.resolve(track_id, frame, box)
+
+        self.assertLessEqual(
+            len(gallery._pending), 12, "pending buffer grew with every short-lived track"
+        )
+
+    def test_buffers_are_purged_even_when_no_track_ever_resolves(self):
+        """Purging used to happen only on the paths that return a person_id,
+        so a stream of never-resolving tracks reached cleanup never."""
+        clock = {"t": 0.0}
+        gallery = self._gallery(clock, min_samples=50)  # nothing will ever resolve
+        box = (100, 100, 160, 260)
+        frame = make_frame_with_patch((0, 0, 220), box)
+
+        for track_id in range(500):
+            clock["t"] = float(track_id)
+            self.assertIsNone(gallery.resolve(track_id, frame, box))
+
+        self.assertLessEqual(len(gallery._pending), 12)
+
+    def test_tiny_boxes_alone_still_drive_cleanup(self):
+        """The 'box too small' path returns before ever buffering a sample; it
+        must still let earlier abandoned buffers expire."""
+        clock = {"t": 0.0}
+        gallery = self._gallery(clock)
+        box = (100, 100, 160, 260)
+        tiny_box = (100, 100, 110, 115)
+        frame = make_frame_with_patch((0, 0, 220), box)
+
+        gallery.resolve(1001, frame, box)
+        self.assertIn(1001, gallery._pending)
+
+        clock["t"] = 50.0
+        gallery.resolve(1002, frame, tiny_box)
+
+        self.assertNotIn(1001, gallery._pending)
+
+
 if __name__ == "__main__":
     unittest.main()

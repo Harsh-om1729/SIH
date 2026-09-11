@@ -25,6 +25,7 @@ directly, every tick, with no placeholder tricks — the same way the video
 placeholder above always worked (a plain per-tick update, nothing manual).
 """
 
+import atexit
 import os
 import sys
 import time
@@ -37,9 +38,11 @@ import streamlit as st
 
 from activity_gate.gate import ActivityGate
 from alerts.alert_manager import AlertManager
+from alerts.dispatch import AlertDispatcher
 from camera.stream_manager import StreamManager
 from config.settings import (
     ALERT_COOLDOWN_SECONDS,
+    ALERT_DISPATCH_QUEUE_SIZE,
     BRIGHTNESS_THRESHOLD,
     CAMERA_HEIGHT,
     CAMERA_SOURCES,
@@ -79,6 +82,12 @@ def build_pipeline():
     manager = StreamManager(CAMERA_SOURCES, width=CAMERA_WIDTH, height=CAMERA_HEIGHT)
     manager.start_all()
     incident_store = IncidentStore()
+    # Same guarantee as app.py: evidence persistence must not run on this
+    # dashboard's frame loop. Built here (inside the cached resource) so one
+    # dispatcher is shared by the single cached pipeline, and stopped at
+    # interpreter exit since this Streamlit script has no shutdown hook.
+    alert_dispatcher = AlertDispatcher(maxsize=ALERT_DISPATCH_QUEUE_SIZE)
+    atexit.register(alert_dispatcher.stop)
     return {
         "manager": manager,
         "preprocessors": {
@@ -100,8 +109,11 @@ def build_pipeline():
         },
         "threat_scorer": ThreatScorer(ThreatRulesDB()),
         "incident_store": incident_store,
+        "alert_dispatcher": alert_dispatcher,
         "alert_manager": AlertManager(
-            cooldown_seconds=ALERT_COOLDOWN_SECONDS, incident_store=incident_store
+            cooldown_seconds=ALERT_COOLDOWN_SECONDS,
+            incident_store=incident_store,
+            dispatcher=alert_dispatcher,
         ),
         "frame_counters": {n: 0 for n in CAMERA_SOURCES},
         "last_processed": {n: None for n in CAMERA_SOURCES},

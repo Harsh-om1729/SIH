@@ -230,5 +230,141 @@ class TestAlertManager(unittest.TestCase):
             self.assertNotIn(1, state)
 
 
+class TestAlertStateIsBounded(unittest.TestCase):
+    """Issue E: `_last_tier` / `_last_alert_time` are keyed by an identity that
+    churns (ByteTrack mints a new id on every re-acquisition), and nothing ever
+    removed entries - including the green path, which writes state for every
+    detection that never alerts at all.
+
+    Eviction must not change rate limiting for a track that is still around,
+    so the TTL is floored at the cooldown; these tests pin both halves.
+    """
+
+    def _manager(self, **kwargs) -> RecordingAlertManager:
+        tmp_dir = tempfile.mkdtemp()
+        # confirm_n=1 unless a test asks otherwise. These cases are about TTL,
+        # eviction and cooldown; the Phase 18 confirmation window (default
+        # confirm_n=2) is a separate behaviour with its own tests below. Left
+        # at the default it silently changes what these measure — a single
+        # detection would no longer alert, so "one alert" assertions would
+        # read zero and the bounded-growth cases would stop exercising the
+        # alerting path they exist to bound.
+        kwargs.setdefault("confirm_n", 1)
+        return RecordingAlertManager(snapshot_dir=str(Path(tmp_dir) / "snapshots"), **kwargs)
+
+    def test_state_ttl_is_never_shorter_than_the_cooldown(self):
+        """A TTL below the cooldown would let eviction reset an in-flight
+        cooldown and fire a duplicate alert."""
+        mgr = self._manager(cooldown_seconds=30.0, state_ttl_seconds=5.0)
+        self.assertGreaterEqual(mgr.state_ttl_seconds, 30.0)
+
+    def test_green_only_traffic_does_not_grow_state_without_bound(self):
+        """The worst leak: most detections are green and never alert, yet each
+        one still wrote a permanent entry."""
+        clock = {"t": 0.0}
+        mgr = self._manager(cooldown_seconds=8.0, state_ttl_seconds=60.0, now_fn=lambda: clock["t"])
+
+        for track_id in range(3000):
+            clock["t"] = float(track_id)
+            mgr.handle(make_detection(track_id=track_id, person_id=track_id),
+                       make_score("green"), recent_frames=["f"])
+
+        self.assertLessEqual(len(mgr._last_tier), 130)
+        self.assertLessEqual(len(mgr._last_seen), 130)
+
+    def test_many_alerting_tracks_stay_bounded(self):
+        clock = {"t": 0.0}
+        mgr = self._manager(cooldown_seconds=8.0, state_ttl_seconds=60.0, now_fn=lambda: clock["t"])
+
+        for track_id in range(2000):
+            clock["t"] = float(track_id)
+            mgr.handle(make_detection(track_id=track_id, person_id=track_id),
+                       make_score("red"), recent_frames=["f"])
+
+        self.assertLessEqual(len(mgr._last_alert_time), 130)
+        self.assertLessEqual(len(mgr._last_tier), 130)
+
+    def test_stale_identity_state_is_actually_removed(self):
+        clock = {"t": 0.0}
+        mgr = self._manager(cooldown_seconds=8.0, state_ttl_seconds=60.0, now_fn=lambda: clock["t"])
+        mgr.handle(make_detection(track_id=1, person_id=1), make_score("yellow"), recent_frames=["f"])
+        self.assertIn(1, mgr._last_tier)
+
+        clock["t"] = 500.0  # long gone; another track drives the sweep
+        mgr.handle(make_detection(track_id=2, person_id=2), make_score("yellow"), recent_frames=["f"])
+
+        self.assertNotIn(1, mgr._last_tier)
+        self.assertNotIn(1, mgr._last_alert_time)
+        self.assertIn(2, mgr._last_tier)
+
+    def test_active_track_keeps_its_cooldown_across_a_purge_sweep(self):
+        """A track that keeps being seen must never have its state evicted -
+        that would let it re-alert inside its own cooldown."""
+        clock = {"t": 0.0}
+        mgr = self._manager(cooldown_seconds=100.0, state_ttl_seconds=60.0, now_fn=lambda: clock["t"])
+
+        mgr.handle(make_detection(), make_score("yellow"), recent_frames=["f"])
+        self.assertEqual(len(mgr.play_calls), 1)
+
+        # Seen continuously for well past the TTL, so sweeps do run.
+        for step in range(1, 10):
+            clock["t"] = step * 10.0
+            mgr.handle(make_detection(), make_score("yellow"), recent_frames=["f"])
+
+        # cooldown is 100s and only 90s have passed: still exactly one alert.
+        self.assertEqual(len(mgr.play_calls), 1, "eviction reset an active track's cooldown")
+
+    def test_eviction_at_the_ttl_boundary_does_not_duplicate_an_alert(self):
+        """TTL and cooldown expiring together: the track alerts again because
+        its cooldown elapsed, not twice because state was dropped."""
+        clock = {"t": 0.0}
+        mgr = self._manager(cooldown_seconds=60.0, state_ttl_seconds=60.0, now_fn=lambda: clock["t"])
+
+        mgr.handle(make_detection(), make_score("yellow"), recent_frames=["f"])
+        clock["t"] = 60.0  # cooldown and TTL boundary reached at the same instant
+        mgr.handle(make_detection(), make_score("yellow"), recent_frames=["f"])
+        clock["t"] = 60.1
+        mgr.handle(make_detection(), make_score("yellow"), recent_frames=["f"])
+
+        self.assertEqual(len(mgr.play_calls), 2)
+
+    def test_escalation_behaviour_survives_a_purge_sweep(self):
+        clock = {"t": 0.0}
+        mgr = self._manager(cooldown_seconds=100.0, state_ttl_seconds=60.0, now_fn=lambda: clock["t"])
+        det = make_detection()
+
+        mgr.handle(det, make_score("yellow"), recent_frames=["f"])
+        clock["t"] = 70.0  # past the TTL, but the track has been seen throughout
+        mgr.handle(det, make_score("yellow"), recent_frames=["f"])
+        clock["t"] = 71.0
+        mgr.handle(det, make_score("red"), recent_frames=["f"])  # escalation
+
+        self.assertEqual(len(mgr.play_calls), 2)
+        self.assertEqual(mgr.snapshot_calls[-1][0], "red")
+
+    def test_a_backwards_clock_step_does_not_disable_cleanup(self):
+        """An NTP correction must not leave the next sweep permanently in the
+        future, which would quietly restore the unbounded growth."""
+        clock = {"t": 1000.0}
+        mgr = self._manager(cooldown_seconds=8.0, state_ttl_seconds=60.0, now_fn=lambda: clock["t"])
+        mgr.handle(make_detection(track_id=1, person_id=1), make_score("green"), recent_frames=["f"])
+
+        clock["t"] = 0.0  # clock steps back
+        mgr.handle(make_detection(track_id=2, person_id=2), make_score("green"), recent_frames=["f"])
+        clock["t"] = 200.0
+        mgr.handle(make_detection(track_id=3, person_id=3), make_score("green"), recent_frames=["f"])
+
+        # Sweeps are still happening: track 2 aged out normally.
+        self.assertNotIn(2, mgr._last_tier)
+        self.assertIn(3, mgr._last_tier)
+        # Track 1 was last seen at a timestamp now in the future, so it is not
+        # stale yet - it is retained (never wrongly evicted) and released once
+        # the clock passes it, so nothing is stranded permanently.
+        self.assertIn(1, mgr._last_tier)
+        clock["t"] = 1100.0
+        mgr.handle(make_detection(track_id=4, person_id=4), make_score("green"), recent_frames=["f"])
+        self.assertNotIn(1, mgr._last_tier)
+
+
 if __name__ == "__main__":
     unittest.main()

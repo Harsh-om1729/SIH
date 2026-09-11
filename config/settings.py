@@ -137,6 +137,8 @@ KINEMATIC_NOMINAL_FPS = float(os.getenv("KINEMATIC_NOMINAL_FPS", "20"))
 
 # Seconds between repeat alerts for the same track at the same tier
 ALERT_COOLDOWN_SECONDS = float(os.getenv("ALERT_COOLDOWN_SECONDS", "8"))
+# Bounded queue for off-thread alert side effects (webhook + evidence).
+ALERT_DISPATCH_QUEUE_SIZE = int(os.getenv("ALERT_DISPATCH_QUEUE_SIZE", "64"))
 
 # Phase 18 (alert discipline): a tier must be observed ALERT_CONFIRM_N times in
 # the last ALERT_CONFIRM_WINDOW scoring cycles before it can raise an alert, and
@@ -193,6 +195,18 @@ SYSLOG_PORT = int(os.getenv("SYSLOG_PORT", "514"))
 # gets checked every frame, since PersonGallery needs consecutive samples to
 # decide an identity in the first place.
 REID_FACE_CHECK_INTERVAL = int(os.getenv("REID_FACE_CHECK_INTERVAL", "5"))
+
+# Fernet key protecting watchlist face embeddings at rest (face/watchlist.py).
+# Same mechanism as the evidence store; kept in its own file so biometric data
+# and evidence data do not share one key. The file is gitignored and created
+# on first use — an existing watchlist.db written before encryption still
+# reads, because _decrypt_embedding falls back to plain JSON.
+WATCHLIST_KEY_PATH = os.getenv("WATCHLIST_KEY_PATH", "database/watchlist.key")
+
+# API_TOKEN is the name main used for the same environment variable that
+# IBVAP_API_TOKEN above already reads. Aliased rather than duplicated so the
+# two can never drift to different values.
+API_TOKEN = IBVAP_API_TOKEN
 
 
 def configure_logging() -> None:
