@@ -1,4 +1,5 @@
 import React from 'react';
+import { useSystemHealth } from '@/components/system/SystemHealthProvider';
 import { NavLink } from 'react-router-dom';
 import {
   LayoutDashboard,
@@ -8,6 +9,8 @@ import {
   BarChart3,
   Shield,
   X,
+  User,
+  Server,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
@@ -25,13 +28,32 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { label: 'Dashboard', to: '/', icon: LayoutDashboard },
-  { label: 'Live Feeds', to: '/live', icon: Video, badge: '4 CAM' },
+  // Badge is filled in from live camera status at render time; it was a
+  // hardcoded '4 CAM' whatever was connected.
+  { label: 'Live Feeds', to: '/live', icon: Video },
   { label: 'Detections', to: '/detections', icon: AlertTriangle },
   { label: 'Zones', to: '/zones', icon: Crosshair },
+  { label: 'Watchlist', to: '/watchlist', icon: User },
   { label: 'Analytics', to: '/analytics', icon: BarChart3 },
+  { label: 'System Health', to: '/settings', icon: Server },
 ];
 
 export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
+  const { cameras, health, reachable } = useSystemHealth();
+  const liveCams = cameras.filter((c) => c.health === 'online' && c.source !== 'idle').length;
+  const camBadge = cameras.length ? `${liveCams}/${cameras.length} CAM` : undefined;
+
+  const footer =
+    reachable === false
+      ? { dot: 'bg-accent-red', text: 'Backend offline' }
+      : !health
+      ? { dot: 'bg-text-muted', text: 'Checking…' }
+      : health.status === 'ok'
+      ? { dot: 'bg-accent-green', text: 'All systems OK' }
+      : health.status === 'degraded'
+      ? { dot: 'bg-accent-yellow', text: 'Camera degraded' }
+      : { dot: 'bg-accent-yellow', text: 'AI pipeline stopped' };
+
   return (
     <>
       {/* Mobile Backdrop */}
@@ -113,9 +135,9 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
                     />
                     <span className="flex-1 truncate">{item.label}</span>
 
-                    {item.badge && (
+                    {(item.to === '/live' ? camBadge : item.badge) && (
                       <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#141a29] text-text-dim border border-white/10">
-                        {item.badge}
+                        {item.to === '/live' ? camBadge : item.badge}
                       </span>
                     )}
                   </>
@@ -127,10 +149,15 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen, onClose }) => {
 
         {/* Simple System Status Footer */}
         <div className="p-3.5 border-t border-[#161924] bg-[#07090f] flex items-center justify-between text-xs font-mono">
-          <span className="flex items-center gap-1.5 text-text-muted">
-            <span className="w-1.5 h-1.5 rounded-full bg-accent-green inline-block" />
-            System Live
-          </span>
+          <NavLink
+            to="/settings"
+            onClick={onClose}
+            className="flex items-center gap-1.5 text-text-muted hover:text-white"
+            title="Open system health"
+          >
+            <span className={`w-1.5 h-1.5 rounded-full inline-block ${footer.dot}`} />
+            {footer.text}
+          </NavLink>
           <span className="text-[10px] text-text-dim">IBVAP Core</span>
         </div>
       </aside>

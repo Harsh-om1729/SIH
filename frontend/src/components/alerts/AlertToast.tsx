@@ -174,12 +174,12 @@ export const AlertToastContainer: React.FC = () => {
                 size="sm"
                 onClick={() => {
                   acknowledgeAlert(toast.id);
-                  navigate(`/live?camera=${toast.cameraName}`);
+                  navigate(`/detections?incident=${toast.id}`);
                 }}
                 className="text-[11px] h-7 px-2.5 font-semibold shadow-sm"
               >
                 <Eye className="w-3 h-3 mr-1" />
-                View Evidence ({toast.cameraName.toUpperCase()})
+                View Evidence
               </Button>
             </div>
           </div>

@@ -41,3 +41,13 @@ export function cameraStreamUrl(cameraId: string): string {
   const base = `${API_CONFIG.baseUrl}/cameras/${encodeURIComponent(cameraId)}/stream`;
   return token ? `${base}?token=${encodeURIComponent(token)}` : base;
 }
+
+/**
+ * Absolute, authenticated URL for an API-served asset used in an <img> —
+ * e.g. an incident's snapshotUrl ("/incidents/12/evidence/snapshot").
+ * Returns undefined for a missing path so it can go straight into `src`.
+ */
+export function apiAssetUrl(path: string | null | undefined): string | undefined {
+  if (!path) return undefined;
+  return withToken(`${API_CONFIG.baseUrl}${path.startsWith('/') ? path : `/${path}`}`);
+}

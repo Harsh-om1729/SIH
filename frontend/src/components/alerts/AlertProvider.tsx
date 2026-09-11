@@ -1,7 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, ReactNode } from 'react';
-import { Incident, mockIncidents } from '@/lib/mockIncidents';
-import { generateSimulatedIncident } from '@/lib/simulateAlertStream';
-import { alertWebSocketClient, WsConnectionStatus } from '@/lib/api';
+import type { Incident } from '@/lib/mockIncidents';
+import { alertWebSocketClient, incidentsApi, WsConnectionStatus } from '@/lib/api';
 import { playYellowChime, playRedSiren } from '@/lib/audioAlerts';
 
 interface AlertContextType {
@@ -16,7 +15,6 @@ interface AlertContextType {
   dismissToast: (id: number) => void;
   acknowledgeAlert: (id: number) => void;
   markAllAsRead: () => void;
-  triggerDemoAlert: (tier?: 'green' | 'yellow' | 'red' | 'watchlist') => Incident;
 }
 
 const AlertContext = createContext<AlertContextType | undefined>(undefined);
@@ -27,29 +25,15 @@ const POPUPS_MUTED_STORAGE_KEY = 'ibvap_popups_muted';
 const MAX_TOASTS = 4;
 
 export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  // Load initial alerts from localStorage (sanitizing any legacy watchlist names) or fallback to mockIncidents
-  const [alerts, setAlerts] = useState<Incident[]>(() => {
-    try {
-      const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed)) {
-          return parsed.map((item: any) => ({ ...item, watchlistMatch: null }));
-        }
-      }
-    } catch {
-      // ignore JSON parse error
-    }
-    return mockIncidents;
-  });
+  // Alerts that arrived over the WebSocket during this session. Starts empty:
+  // it used to start from mockIncidents and reload whatever was saved in
+  // localStorage — including simulated alerts — and IncidentsPage merged this
+  // list into the real incident table, where sample rows then sat under a
+  // "Live data" badge. The database is the history; this is only the feed.
+  const [alerts, setAlerts] = useState<Incident[]>([]);
 
   const [activeToasts, setActiveToasts] = useState<Incident[]>([]);
-  const [unreadCount, setUnreadCount] = useState<number>(() => {
-    return Math.min(
-      alerts.filter((i) => i.tier === 'red' || i.tier === 'yellow').length,
-      5
-    );
-  });
+  const [unreadCount, setUnreadCount] = useState<number>(0);
   const [backendStatus, setBackendStatus] = useState<WsConnectionStatus>('offline-fallback');
 
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
@@ -97,24 +81,36 @@ export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     });
   }, []);
 
-  // Sync alerts to localStorage
+  // One-time cleanup: drop the alert list older builds persisted, which can
+  // hold simulated incidents that would otherwise never go away.
   useEffect(() => {
     try {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(alerts.slice(0, 100)));
+      localStorage.removeItem(LOCAL_STORAGE_KEY);
     } catch {
-      // ignore storage quota errors
+      // storage unavailable; nothing to clean
     }
-  }, [alerts]);
+  }, []);
 
   // Dismiss a toast
   const dismissToast = useCallback((id: number) => {
     setActiveToasts((prev) => prev.filter((toast) => toast.id !== id));
   }, []);
 
-  // Acknowledge an alert (removes from toast and decrements unread)
+  // Acknowledge an alert: records it in incidents.db (so every other screen
+  // and operator sees it as acknowledged), then clears it from the toast
+  // stack and the unread count. It used to only hide the toast locally.
   const acknowledgeAlert = useCallback((id: number) => {
     dismissToast(id);
     setUnreadCount((prev) => Math.max(0, prev - 1));
+    incidentsApi.acknowledgeIncident(id).then((res) => {
+      if (res.isFallback) {
+        console.warn(`Acknowledge failed for incident ${id}: ${res.error}`);
+        return;
+      }
+      setAlerts((prev) =>
+        prev.map((a) => (a.id === id ? { ...a, status: 'acknowledged' } : a))
+      );
+    });
   }, [dismissToast]);
 
   // Mark all alerts as read
@@ -128,7 +124,10 @@ export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     (incident: Incident) => {
       // Clean any accidental name field
       const sanitizedIncident = { ...incident, watchlistMatch: null };
-      setAlerts((prev) => [sanitizedIncident, ...prev]);
+      // Dedupe by id (a reconnect can redeliver) and cap the session list.
+      setAlerts((prev) =>
+        [sanitizedIncident, ...prev.filter((a) => a.id !== sanitizedIncident.id)].slice(0, 200)
+      );
 
       // Green tier: silent logging (no toast, no unread badge increment, no audio)
       if (sanitizedIncident.tier === 'green') {
@@ -165,23 +164,6 @@ export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     [dismissToast, soundEnabled, popupsMuted]
   );
 
-  // Expose trigger for manual demo testing
-  const triggerDemoAlert = useCallback(
-    (tier?: 'green' | 'yellow' | 'red' | 'watchlist') => {
-      const targetTier = tier === 'watchlist' ? 'red' : tier;
-      const incident = generateSimulatedIncident(targetTier);
-      incident.watchlistMatch = null;
-      if (tier === 'watchlist') {
-        incident.category = 'person';
-        incident.score = 98.5;
-        incident.tier = 'red';
-      }
-      handleIncomingAlert(incident);
-      return incident;
-    },
-    [handleIncomingAlert]
-  );
-
   // Connect WebSocket & Listen to alerts / status
   useEffect(() => {
     alertWebSocketClient.connect();
@@ -200,19 +182,10 @@ export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) =
     };
   }, [handleIncomingAlert]);
 
-  // Background stream: If backend is offline or disconnected, simulate detections every 22s
-  useEffect(() => {
-    if (backendStatus === 'connected') {
-      return;
-    }
-
-    const interval = setInterval(() => {
-      const newAlert = generateSimulatedIncident();
-      handleIncomingAlert(newAlert);
-    }, 22000);
-
-    return () => clearInterval(interval);
-  }, [backendStatus, handleIncomingAlert]);
+  // (Removed: a timer that invented a detection every 22s whenever the
+  // WebSocket was not connected — including during every normal reconnect —
+  // complete with siren and toast. When the feed is down the UI now says so;
+  // it does not manufacture alerts.)
 
   return (
     <AlertContext.Provider
@@ -228,7 +201,6 @@ export const AlertProvider: React.FC<{ children: ReactNode }> = ({ children }) =
         dismissToast,
         acknowledgeAlert,
         markAllAsRead,
-        triggerDemoAlert,
       }}
     >
       {children}

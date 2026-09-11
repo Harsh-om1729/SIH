@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { settingsApi } from '@/lib/api';
+import { IntegrationTestResult, settingsApi, systemApi } from '@/lib/api';
+import { useSystemHealth } from '@/components/system/SystemHealthProvider';
 import { DataSourceBadge } from '@/components/ui/DataSourceBadge';
 import {
   loadThresholdSettings,
@@ -7,7 +8,6 @@ import {
   loadIntegrationSettings,
   saveIntegrationSettings,
   DEFAULT_THRESHOLDS,
-  DEFAULT_TELEMETRY,
   ThresholdSettings,
   IntegrationSettings,
 } from '@/lib/settingsState';
@@ -25,7 +25,6 @@ import {
   CheckCircle2,
   HardDrive,
   Gauge,
-  Thermometer,
   Send,
   Server,
   BellRing,
@@ -35,7 +34,16 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 
+function formatDuration(seconds: number): string {
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h > 0 ? `${h}h ${m}m` : `${m}m ${Math.floor(seconds % 60)}s`;
+}
+
 export const SettingsPage: React.FC = () => {
+  // Measured system state (psutil, the pipeline's own health file, the DB).
+  // Replaces a constant "NVIDIA Jetson Orin · 42% GPU · 71 °C" panel.
+  const { health, cameras, reachable, refresh } = useSystemHealth();
   const [activeTab, setActiveTab] = useState<string>('telemetry');
 
   // Thresholds State
@@ -69,32 +77,18 @@ export const SettingsPage: React.FC = () => {
 
   // Diagnostic Test State
   const [testStatus, setTestStatus] = useState<'idle' | 'testing' | 'success'>('idle');
-
-  // Telemetry State (Air-gap toggle)
-  const [isAirGapped, setIsAirGapped] = useState(DEFAULT_TELEMETRY.isAirGapped);
+  const [testResult, setTestResult] = useState<IntegrationTestResult | null>(null);
+  const [testError, setTestError] = useState<string | null>(null);
 
   // Air-Gapped USB Sync State (Section 17.3)
-  const [usbMounted, setUsbMounted] = useState(true);
-  const [usbActionStatus, setUsbActionStatus] = useState<string | null>(null);
-  const [isProcessingUsb, setIsProcessingUsb] = useState(false);
+  const [usbActionStatus, setUsbActionStatus] = useState<'EXPORT' | 'IMPORT' | null>(null);
 
-  const handleExportUsbBundle = () => {
-    setIsProcessingUsb(true);
-    setTimeout(() => {
-      setIsProcessingUsb(false);
-      setUsbActionStatus('EXPORT_SUCCESS');
-      setTimeout(() => setUsbActionStatus(null), 4000);
-    }, 1100);
-  };
+  // The browser cannot reach a USB volume on the edge node, so these show the
+  // real command instead of pretending. They used to wait ~1s and announce an
+  // "ENCRYPTED EXPORT COMPLETE" / "BUNDLE VERIFIED & APPLIED" that never ran.
+  const handleExportUsbBundle = () => setUsbActionStatus((st) => (st === 'EXPORT' ? null : 'EXPORT'));
 
-  const handleImportUsbBundle = () => {
-    setIsProcessingUsb(true);
-    setTimeout(() => {
-      setIsProcessingUsb(false);
-      setUsbActionStatus('IMPORT_SUCCESS');
-      setTimeout(() => setUsbActionStatus(null), 4000);
-    }, 1300);
-  };
+  const handleImportUsbBundle = () => setUsbActionStatus((st) => (st === 'IMPORT' ? null : 'IMPORT'));
 
   // Save Thresholds Handler
   const handleSaveThresholds = async () => {
@@ -126,12 +120,17 @@ export const SettingsPage: React.FC = () => {
   };
 
   // Run C2 Diagnostic Test
-  const handleRunDiagnostic = () => {
+  // Sends a real test message through /api/v1/integrations/test. It used to
+  // show "HTTP 200 OK · 24.2 ms · SIEM ACK RECEIVED" after a timer, whether or
+  // not a webhook was even configured.
+  const handleRunDiagnostic = async () => {
     setTestStatus('testing');
-    setTimeout(() => {
-      setTestStatus('success');
-      setTimeout(() => setTestStatus('idle'), 5000);
-    }, 1200);
+    setTestResult(null);
+    setTestError(null);
+    const res = await systemApi.testIntegrations();
+    if (res.isFallback || !res.data) setTestError(res.error ?? 'backend unreachable');
+    else setTestResult(res.data);
+    setTestStatus('success');
   };
 
   const tabItems = [
@@ -184,15 +183,25 @@ export const SettingsPage: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <Badge
-            variant={isAirGapped ? 'yellow' : 'green'}
+            variant={
+              reachable === false ? 'red' : !health ? 'neutral' : health.status === 'ok' ? 'green' : 'yellow'
+            }
             dot
             size="md"
             className="font-mono text-xs"
           >
-            {isAirGapped ? 'MODE: AIR-GAPPED' : 'MODE: C2 CONNECTED'}
+            {reachable === false
+              ? 'BACKEND OFFLINE'
+              : !health
+              ? 'CHECKING…'
+              : health.status === 'ok'
+              ? 'SYSTEM OK'
+              : health.status === 'degraded'
+              ? 'CAMERA DEGRADED'
+              : 'AI PIPELINE STOPPED'}
           </Badge>
-          <Badge variant="teal" size="md" className="font-mono text-xs">
-            OS: v2.4.0-TACTICAL
+          <Badge variant={integrations.capEnabled ? 'teal' : 'neutral'} size="md" className="font-mono text-xs">
+            {integrations.capEnabled ? 'C2 WEBHOOK ON' : 'NO C2 WEBHOOK'}
           </Badge>
         </div>
       </div>
@@ -208,239 +217,241 @@ export const SettingsPage: React.FC = () => {
       {/* TAB 1: SYSTEM TELEMETRY & HARDWARE HEALTH */}
       {activeTab === 'telemetry' && (
         <div className="space-y-6">
-          {/* Edge Compute Overview Banner */}
-          <div className="p-4 rounded-md bg-bg-surface border border-border-subtle flex flex-col md:flex-row md:items-center justify-between gap-4">
-            <div className="flex items-center gap-3.5">
-              <div className="p-2.5 rounded-md bg-accent-teal/15 text-accent-teal">
-                <Cpu className="w-6 h-6" />
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold text-text-primary">
-                  NVIDIA Jetson Orin Industrial Edge Node
-                </h3>
-                <p className="text-xs text-text-dim font-mono">
-                  ARCH: ARM64 Cortex-A78AE · TENSORRT 8.6 · ACCEL: 275 TOPS INT8
-                </p>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-3">
-              <span className="text-xs text-text-dim">Network Isolation:</span>
-              <button
-                onClick={() => setIsAirGapped(!isAirGapped)}
-                className={`px-3 py-1.5 rounded text-xs font-mono font-semibold transition-all border ${
-                  isAirGapped
-                    ? 'bg-accent-yellow/15 text-accent-yellow border-accent-yellow/40 hover:bg-accent-yellow/25'
-                    : 'bg-accent-green/15 text-accent-green border-accent-green/40 hover:bg-accent-green/25'
-                }`}
+          {!health ? (
+            <Card variant="elevated">
+              <div
+                role={reachable === false ? 'alert' : 'status'}
+                className="p-6 text-center space-y-3 font-mono text-xs"
               >
-                {isAirGapped ? 'Air-Gapped (Isolated)' : 'C2 Uplink Active'}
-              </button>
-            </div>
-          </div>
-
-          {/* 6 Hardware Gauges Grid */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-            {/* GPU Core Load */}
-            <Card variant="elevated" className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-mono text-text-dim flex items-center gap-1.5">
-                  <Gauge className="w-4 h-4 text-accent-teal" />
-                  GPU UTILIZATION
-                </span>
-                <span className="font-mono text-sm font-bold text-accent-teal">
-                  {DEFAULT_TELEMETRY.gpuUtilization}%
-                </span>
+                {reachable === false ? (
+                  <>
+                    <AlertTriangle className="w-6 h-6 text-accent-red mx-auto" />
+                    <p className="text-accent-red">Backend unreachable — system health cannot be measured.</p>
+                    <Button variant="secondary" size="sm" onClick={() => refresh()}>
+                      Retry
+                    </Button>
+                  </>
+                ) : (
+                  <p className="text-text-dim">Measuring system health…</p>
+                )}
               </div>
-              <div className="w-full bg-bg-primary h-2 rounded-full overflow-hidden">
-                <div
-                  className="bg-accent-teal h-full rounded-full transition-all"
-                  style={{ width: `${DEFAULT_TELEMETRY.gpuUtilization}%` }}
-                />
-              </div>
-              <p className="text-[11px] text-text-muted">
-                Tensor Cores active · Parallel YOLOv8x batch size: 4
-              </p>
             </Card>
+          ) : (
+            <>
+              <div className="p-4 rounded-md bg-bg-surface border border-border-subtle flex flex-col md:flex-row md:items-center justify-between gap-3">
+                <div className="flex items-center gap-3.5">
+                  <div className="p-2.5 rounded-md bg-accent-teal/15 text-accent-teal">
+                    <Server className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-text-primary">
+                      {health.status === 'ok'
+                        ? 'All systems operational'
+                        : health.status === 'degraded'
+                        ? 'Degraded — a camera is not online'
+                        : 'AI pipeline stopped — no detections or alerts'}
+                    </h3>
+                    <p className="text-xs text-text-dim font-mono">
+                      API up {formatDuration(health.api.uptimeSeconds)} · {health.api.websocketClients} alert-feed
+                      client(s) · checked{' '}
+                      {new Date(health.checkedAt * 1000).toLocaleTimeString('en-GB', { hour12: false })}
+                    </p>
+                  </div>
+                </div>
+                {!health.pipeline.running && (
+                  <p className="text-xs font-mono text-accent-yellow max-w-md">{health.pipeline.detail}</p>
+                )}
+              </div>
 
-            {/* Inference Latency */}
-            <Card variant="elevated" className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-mono text-text-dim flex items-center gap-1.5">
-                  <Activity className="w-4 h-4 text-accent-green" />
-                  INFERENCE LATENCY
-                </span>
-                <span className="font-mono text-sm font-bold text-accent-green">
-                  {DEFAULT_TELEMETRY.inferenceLatencyMs} ms
-                </span>
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                {[
+                  {
+                    label: 'CPU',
+                    value: health.host ? `${health.host.cpuPercent.toFixed(0)}%` : '—',
+                    pct: health.host?.cpuPercent ?? null,
+                    sub: health.host ? `${health.host.cpuCount} cores` : 'psutil unavailable',
+                    icon: Cpu,
+                  },
+                  {
+                    label: 'Memory',
+                    value: health.host ? `${health.host.memoryUsedGb} / ${health.host.memoryTotalGb} GB` : '—',
+                    pct: health.host?.memoryPercent ?? null,
+                    sub: health.host
+                      ? `API ${health.host.apiRssMb} MB${health.pipeline.rssMb ? ` · pipeline ${health.pipeline.rssMb} MB` : ''}`
+                      : '',
+                    icon: Gauge,
+                  },
+                  {
+                    label: 'Disk',
+                    value: `${health.disk.freeGb} GB free`,
+                    pct: health.disk.percentUsed,
+                    sub: `of ${health.disk.totalGb} GB`,
+                    icon: HardDrive,
+                  },
+                  {
+                    label: 'Evidence store',
+                    value: `${health.evidence.files} files`,
+                    pct: null,
+                    sub: `${health.evidence.sizeMb} MB encrypted in ${health.evidence.dir}/`,
+                    icon: Lock,
+                  },
+                ].map((m) => {
+                  const Icon = m.icon;
+                  return (
+                    <Card key={m.label} variant="elevated">
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-xs text-text-dim">
+                          <span>{m.label}</span>
+                          <Icon className="w-4 h-4" />
+                        </div>
+                        <div className="text-lg font-bold text-text-primary font-mono">{m.value}</div>
+                        {m.pct != null && (
+                          <div
+                            className="h-1.5 rounded bg-white/10 overflow-hidden"
+                            role="meter"
+                            aria-label={`${m.label} usage`}
+                            aria-valuenow={Math.round(m.pct)}
+                            aria-valuemin={0}
+                            aria-valuemax={100}
+                          >
+                            <div
+                              className={`h-full ${m.pct > 90 ? 'bg-accent-red' : m.pct > 75 ? 'bg-accent-yellow' : 'bg-accent-teal'}`}
+                              style={{ width: `${Math.min(100, m.pct)}%` }}
+                            />
+                          </div>
+                        )}
+                        <div className="text-[11px] text-text-muted font-mono">{m.sub}</div>
+                      </div>
+                    </Card>
+                  );
+                })}
               </div>
-              <div className="w-full bg-bg-primary h-2 rounded-full overflow-hidden">
-                <div
-                  className="bg-accent-green h-full rounded-full transition-all"
-                  style={{ width: `${(DEFAULT_TELEMETRY.inferenceLatencyMs / 33.3) * 100}%` }}
-                />
-              </div>
-              <p className="text-[11px] text-text-muted">
-                Locked 30.0 FPS pipeline · Target budget &lt;33.3 ms
+              <p className="text-[11px] text-text-muted font-mono -mt-3">
+                GPU utilisation and temperature are not shown: nothing in this stack measures them
+                portably, and a fixed number would be misleading.
               </p>
-            </Card>
 
-            {/* Core Temperature */}
-            <Card variant="elevated" className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-mono text-text-dim flex items-center gap-1.5">
-                  <Thermometer className="w-4 h-4 text-accent-yellow" />
-                  CORE TEMPERATURE
-                </span>
-                <span className="font-mono text-sm font-bold text-accent-yellow">
-                  {DEFAULT_TELEMETRY.temperatureC} °C
-                </span>
-              </div>
-              <div className="w-full bg-bg-primary h-2 rounded-full overflow-hidden">
-                <div
-                  className="bg-accent-yellow h-full rounded-full transition-all"
-                  style={{ width: `${(DEFAULT_TELEMETRY.temperatureC / 85) * 100}%` }}
-                />
-              </div>
-              <p className="text-[11px] text-text-muted">
-                Thermal dissipation nominal · Throttle cutoff at 85 °C
-              </p>
-            </Card>
+              <Card
+                title={
+                  <div className="flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-accent-teal" />
+                    <span>Camera Pipelines</span>
+                  </div>
+                }
+                subtitle="Measured per camera by the running AI pipeline"
+                variant="elevated"
+              >
+                {cameras.length === 0 ? (
+                  <p className="text-xs text-text-dim font-mono p-2">No cameras configured.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-border-subtle font-mono text-[11px] text-text-dim">
+                          <th className="py-2.5 px-3">CAMERA</th>
+                          <th className="py-2.5 px-3">SOURCE</th>
+                          <th className="py-2.5 px-3">FPS</th>
+                          <th className="py-2.5 px-3">ACTIVITY</th>
+                          <th className="py-2.5 px-3">LOW-LIGHT</th>
+                          <th className="py-2.5 px-3">ZONES</th>
+                          <th className="py-2.5 px-3">STATUS</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border-subtle/40 font-mono">
+                        {cameras.map((c) => (
+                          <tr key={c.id}>
+                            <td className="py-2.5 px-3 font-semibold text-text-primary">
+                              {c.id.toUpperCase()}
+                              <span className="block text-[10px] text-text-dim font-normal">{c.location}</span>
+                            </td>
+                            <td className="py-2.5 px-3 text-text-dim">
+                              {c.source === 'pipeline' ? 'AI pipeline' : c.source === 'direct' ? 'Direct preview' : 'Idle'}
+                            </td>
+                            <td className="py-2.5 px-3 text-accent-teal">{c.source === 'idle' ? '—' : c.fps}</td>
+                            <td className="py-2.5 px-3 text-text-dim">
+                              {c.activityGate === 'HIGH' ? 'Motion' : c.activityGate === 'LOW' ? 'Idle' : '—'}
+                            </td>
+                            <td className="py-2.5 px-3 text-text-dim">
+                              {c.lowLightBoost == null ? '—' : `${c.lowLightBoost ? 'Boost' : 'Off'} (${c.brightness})`}
+                            </td>
+                            <td className={`py-2.5 px-3 ${c.zones ? 'text-text-dim' : 'text-accent-yellow'}`}>
+                              {c.zones ?? 0}
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <Badge
+                                variant={
+                                  c.health === 'online' ? 'green' : c.health === 'reconnecting' ? 'yellow' : c.health === 'offline' ? 'red' : 'neutral'
+                                }
+                                size="sm"
+                                dot
+                              >
+                                {(c.health ?? 'unknown').toUpperCase()}
+                              </Badge>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </Card>
 
-            {/* CPU Load */}
-            <Card variant="elevated" className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-mono text-text-dim flex items-center gap-1.5">
-                  <Cpu className="w-4 h-4 text-text-primary" />
-                  CPU LOAD (8-CORE)
-                </span>
-                <span className="font-mono text-sm font-bold text-text-primary">
-                  {DEFAULT_TELEMETRY.cpuUtilization}%
-                </span>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <Card
+                  title="AI Models"
+                  subtitle={
+                    health.pipeline.running
+                      ? `Loaded by pipeline pid ${health.pipeline.pid}`
+                      : 'On disk — the pipeline is not running'
+                  }
+                  variant="elevated"
+                >
+                  <ul className="space-y-2 font-mono text-xs">
+                    {Object.entries(health.models).map(([name, m]) => (
+                      <li key={name} className="flex items-center justify-between gap-2">
+                        <span className="text-text-primary w-20 shrink-0">
+                          {name === 'reid' ? 'Re-ID' : name[0].toUpperCase() + name.slice(1)}
+                        </span>
+                        <span className="text-text-dim truncate flex-1" title={m.path}>{m.path}</span>
+                        <Badge variant={m.present ? 'green' : 'red'} size="sm">
+                          {m.present ? `${m.sizeMb} MB` : 'MISSING'}
+                        </Badge>
+                      </li>
+                    ))}
+                  </ul>
+                </Card>
+                <Card title="Incident store & watchlist" subtitle="database/incidents.db · database/watchlist.db" variant="elevated">
+                  {health.database.ok ? (
+                    <div className="grid grid-cols-3 gap-3 font-mono text-xs">
+                      {(
+                        [
+                          ['Total', health.database.total],
+                          ['Open', health.database.open],
+                          ['Open RED', health.database.openRed],
+                          ['Acknowledged', health.database.acknowledged],
+                          ['Resolved', health.database.resolved],
+                          ['Watchlist', health.watchlist.enrolled ?? '—'],
+                        ] as [string, React.ReactNode][]
+                      ).map(([k, v]) => (
+                        <div key={k}>
+                          <span className="text-[10px] text-text-dim block uppercase">{k}</span>
+                          <span className="text-text-primary font-bold">{v}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-xs text-accent-red font-mono">Database error: {health.database.error}</p>
+                  )}
+                  {health.database.lastIncidentAt && (
+                    <p className="mt-3 text-[11px] text-text-muted font-mono">
+                      Last incident{' '}
+                      {new Date(health.database.lastIncidentAt * 1000).toLocaleString('en-GB', { hour12: false })}
+                    </p>
+                  )}
+                </Card>
               </div>
-              <div className="w-full bg-bg-primary h-2 rounded-full overflow-hidden">
-                <div
-                  className="bg-border-focus h-full rounded-full transition-all"
-                  style={{ width: `${DEFAULT_TELEMETRY.cpuUtilization}%` }}
-                />
-              </div>
-              <p className="text-[11px] text-text-muted">
-                DeepSORT tracker & RTSP H.264 stream demuxing
-              </p>
-            </Card>
-
-            {/* Host Memory RAM */}
-            <Card variant="elevated" className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-mono text-text-dim flex items-center gap-1.5">
-                  <Server className="w-4 h-4 text-accent-teal" />
-                  UNIFIED MEMORY (RAM)
-                </span>
-                <span className="font-mono text-sm font-bold text-accent-teal">
-                  {DEFAULT_TELEMETRY.ramUsageGb} / {DEFAULT_TELEMETRY.ramTotalGb} GB
-                </span>
-              </div>
-              <div className="w-full bg-bg-primary h-2 rounded-full overflow-hidden">
-                <div
-                  className="bg-accent-teal h-full rounded-full transition-all"
-                  style={{
-                    width: `${(DEFAULT_TELEMETRY.ramUsageGb / DEFAULT_TELEMETRY.ramTotalGb) * 100}%`,
-                  }}
-                />
-              </div>
-              <p className="text-[11px] text-text-muted">
-                36% allocated · LPDDR5 shared system memory
-              </p>
-            </Card>
-
-            {/* NVMe SSD Retention Storage */}
-            <Card variant="elevated" className="space-y-3">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-mono text-text-dim flex items-center gap-1.5">
-                  <HardDrive className="w-4 h-4 text-accent-green" />
-                  EVIDENCE STORAGE
-                </span>
-                <span className="font-mono text-sm font-bold text-accent-green">
-                  {DEFAULT_TELEMETRY.storageUsedGb} / {DEFAULT_TELEMETRY.storageTotalGb} GB
-                </span>
-              </div>
-              <div className="w-full bg-bg-primary h-2 rounded-full overflow-hidden">
-                <div
-                  className="bg-accent-green h-full rounded-full transition-all"
-                  style={{
-                    width: `${(DEFAULT_TELEMETRY.storageUsedGb / DEFAULT_TELEMETRY.storageTotalGb) * 100}%`,
-                  }}
-                />
-              </div>
-              <p className="text-[11px] text-text-muted">
-                NVMe Gen4 SSD · Auto-purge oldest unflagged files at &gt;85%
-              </p>
-            </Card>
-          </div>
-
-          {/* Active Camera Video Pipeline Table */}
-          <Card
-            title={
-              <div className="flex items-center gap-2">
-                <Activity className="w-4 h-4 text-accent-teal" />
-                <span>Active Camera Video Pipelines</span>
-              </div>
-            }
-            subtitle="Real-time RTSP ingest decode, frame buffer synchronization, and inferencing health"
-            variant="elevated"
-          >
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead>
-                  <tr className="border-b border-border-subtle font-mono text-[11px] text-text-dim">
-                    <th className="py-2.5 px-3">CAMERA</th>
-                    <th className="py-2.5 px-3">RESOLUTION</th>
-                    <th className="py-2.5 px-3">FPS</th>
-                    <th className="py-2.5 px-3">AI MODEL</th>
-                    <th className="py-2.5 px-3">STATUS</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-border-subtle/40 font-mono">
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-text-primary">CAM0 - PERIMETER NORTH</td>
-                    <td className="py-2.5 px-3 text-text-dim">640×480 (VGA Feed)</td>
-                    <td className="py-2.5 px-3 text-accent-green">30.0 FPS</td>
-                    <td className="py-2.5 px-3 text-text-dim">YOLOv8 + Activity Gate (HIGH)</td>
-                    <td className="py-2.5 px-3">
-                      <Badge variant="green" size="sm" dot>INGESTING</Badge>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-text-primary">CAM1 - PERIMETER WEST</td>
-                    <td className="py-2.5 px-3 text-text-dim">640×480 (VGA Feed)</td>
-                    <td className="py-2.5 px-3 text-accent-yellow">3.0 FPS</td>
-                    <td className="py-2.5 px-3 text-text-dim">Keep-Alive (GATE: LOW 1/10)</td>
-                    <td className="py-2.5 px-3">
-                      <Badge variant="yellow" size="sm" dot>STANDBY</Badge>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-text-primary">CAM2 - VEHICLE CHECKPOST</td>
-                    <td className="py-2.5 px-3 text-text-dim">640×480 (VGA Feed)</td>
-                    <td className="py-2.5 px-3 text-accent-green">28.4 FPS</td>
-                    <td className="py-2.5 px-3 text-text-dim">YOLOv8 + ByteTrack</td>
-                    <td className="py-2.5 px-3">
-                      <Badge variant="green" size="sm" dot>INGESTING</Badge>
-                    </td>
-                  </tr>
-                  <tr>
-                    <td className="py-2.5 px-3 font-semibold text-text-primary">CAM3 - TACTICAL BOP EAST</td>
-                    <td className="py-2.5 px-3 text-text-dim">640×480 (VGA Feed)</td>
-                    <td className="py-2.5 px-3 text-accent-green">29.5 FPS</td>
-                    <td className="py-2.5 px-3 text-accent-purple font-medium">CLAHE Lux &lt; 90 Boost + IR</td>
-                    <td className="py-2.5 px-3">
-                      <Badge variant="purple" size="sm" dot>BOOSTED</Badge>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </Card>
+            </>
+          )}
         </div>
       )}
 
@@ -938,20 +949,37 @@ export const SettingsPage: React.FC = () => {
 
               {/* Diagnostic Result */}
               {testStatus === 'testing' && (
-                <div className="p-3 rounded bg-accent-teal/10 border border-accent-teal/30 text-accent-teal font-mono text-xs flex items-center gap-2 animate-pulse">
+                <div role="status" className="p-3 rounded bg-accent-teal/10 border border-accent-teal/30 text-accent-teal font-mono text-xs flex items-center gap-2">
                   <Activity className="w-4 h-4 animate-spin" />
-                  <span>[DISPATCHING] Transmitting encrypted test packet to {integrations.capWebhookUrl}...</span>
+                  <span>Sending a test message to the saved webhook and syslog targets…</span>
                 </div>
               )}
 
               {testStatus === 'success' && (
-                <div className="p-3 rounded bg-accent-green/10 border border-accent-green/30 text-accent-green font-mono text-xs space-y-1 animate-fadeIn">
-                  <div className="flex items-center gap-2 font-bold">
-                    <CheckCircle2 className="w-4 h-4" />
-                    <span>DIAGNOSTIC TEST PASSED · HTTP 200 OK</span>
-                  </div>
-                  <div className="text-[11px] text-text-dim">
-                    Packet round-trip latency: 24.2 ms · SIEM Syslog ACK: RECEIVED · Relay Driver: OPERATIONAL
+                <div role="status" className="p-3 rounded bg-bg-surface border border-border-subtle font-mono text-xs space-y-1.5">
+                  {testError ? (
+                    <div className="text-accent-red">Test could not run: {testError}</div>
+                  ) : (
+                    <>
+                      {testResult?.webhook && (
+                        <div className={testResult.webhook.ok ? 'text-accent-green' : 'text-accent-red'}>
+                          WEBHOOK ·{' '}
+                          {testResult.webhook.ok
+                            ? `HTTP ${testResult.webhook.status} in ${testResult.webhook.latencyMs} ms`
+                            : testResult.webhook.detail ?? `HTTP ${testResult.webhook.status}`}
+                          {testResult.webhook.url ? ` · ${testResult.webhook.url}` : ''}
+                        </div>
+                      )}
+                      {testResult?.syslog && (
+                        <div className={testResult.syslog.ok ? 'text-accent-green' : 'text-accent-yellow'}>
+                          SYSLOG · {testResult.syslog.detail}
+                        </div>
+                      )}
+                    </>
+                  )}
+                  <div className="text-[10px] text-text-muted">
+                    Tests the saved configuration — save first if you changed it. The running pipeline
+                    keeps its .env values until it restarts.
                   </div>
                 </div>
               )}
@@ -1082,30 +1110,36 @@ export const SettingsPage: React.FC = () => {
               </p>
             </div>
             <div className="flex items-center gap-2">
-              <Badge variant={usbMounted ? 'green' : 'yellow'} dot size="md">
-                {usbMounted ? 'TOKEN: SEC-BOP-KEY-09 MOUNTED' : 'NO USB TOKEN MOUNTED'}
+              <Badge variant="neutral" size="md">
+                RUNS ON THE EDGE NODE (CLI)
               </Badge>
-              <button
-                onClick={() => setUsbMounted(!usbMounted)}
-                className="px-2.5 py-1 text-[11px] rounded bg-bg-elevated border border-border-subtle hover:text-text-primary text-text-dim transition-colors"
-              >
-                {usbMounted ? 'Unmount' : 'Mount Token'}
-              </button>
             </div>
           </div>
 
           {/* Action Status Feedback */}
-          {usbActionStatus === 'EXPORT_SUCCESS' && (
-            <div className="p-3 rounded bg-accent-green/15 border border-accent-green/40 font-mono text-xs text-accent-green flex items-center gap-2 animate-fadeIn">
-              <CheckCircle2 className="w-4 h-4" />
-              <span>[ENCRYPTED EXPORT COMPLETE] Generated bundle <strong>bop_alpha_sync_20260908.ibvap.enc</strong> · Fernet Cipher OK · SHA-256 HMAC written to token volume.</span>
+          {usbActionStatus === 'EXPORT' && (
+            <div role="status" className="p-3 rounded bg-bg-surface border border-border-subtle font-mono text-xs space-y-1.5">
+              <div className="text-text-primary">Run on the edge node, from ibvap/:</div>
+              <code className="block text-accent-teal break-all">
+                python scripts/export_for_usb_transfer.py /Volumes/&lt;USB&gt;/transfer_bundle.enc
+              </code>
+              <div className="text-text-muted">
+                Bundles database/threat_rules.db and database/watchlist.db into one encrypted file.
+                A browser cannot write to a USB volume on the edge node, so this is a command, not a button.
+              </div>
             </div>
           )}
 
-          {usbActionStatus === 'IMPORT_SUCCESS' && (
-            <div className="p-3 rounded bg-accent-teal/15 border border-accent-teal/40 font-mono text-xs text-accent-teal flex items-center gap-2 animate-fadeIn">
-              <CheckCircle2 className="w-4 h-4" />
-              <span>[BUNDLE VERIFIED & APPLIED] Signature validated with Sector HQ Public Key · 14 Sector Rules updated in threat_rules.db · Zero overwrite of local site calibrations!</span>
+          {usbActionStatus === 'IMPORT' && (
+            <div role="status" className="p-3 rounded bg-bg-surface border border-border-subtle font-mono text-xs space-y-1.5">
+              <div className="text-text-primary">Run on the edge node, from ibvap/:</div>
+              <code className="block text-accent-teal break-all">
+                python scripts/import_from_usb_transfer.py /Volumes/&lt;USB&gt;/transfer_bundle.enc
+              </code>
+              <div className="text-text-muted">
+                Decrypts the bundle and installs its files into database/. Restart the pipeline afterwards
+                so it reloads the rules and watchlist.
+              </div>
             </div>
           )}
 
@@ -1116,25 +1150,25 @@ export const SettingsPage: React.FC = () => {
               title={
                 <div className="flex items-center gap-2">
                   <Send className="w-4 h-4 text-accent-teal" />
-                  <span>Export Outpost Incident & Telemetry Bundle</span>
+                  <span>Export Rules & Watchlist Bundle</span>
                 </div>
               }
-              subtitle="Package local incident evidence logs and sensor metrics for physical transfer to Sector HQ"
+              subtitle="Packages threat_rules.db and watchlist.db for physical transfer to another site"
               variant="elevated"
             >
               <div className="space-y-3 pt-2">
                 <div className="p-2.5 rounded bg-bg-surface border border-border-subtle text-[11px] space-y-1">
                   <div className="flex justify-between text-text-dim">
-                    <span>Target Volume:</span>
-                    <span className="text-text-primary">/media/SEC-BOP-KEY-09/sync/</span>
+                    <span>Contents:</span>
+                    <span className="text-text-primary">threat_rules.db + watchlist.db</span>
                   </div>
                   <div className="flex justify-between text-text-dim">
-                    <span>Incidents Pending Sync:</span>
-                    <span className="text-accent-teal font-bold">15 Records (All Encrypted)</span>
+                    <span>Watchlist entries:</span>
+                    <span className="text-accent-teal font-bold">{health?.watchlist.enrolled ?? '—'}</span>
                   </div>
                   <div className="flex justify-between text-text-dim">
-                    <span>Cryptographic HMAC:</span>
-                    <span className="text-accent-green">SHA-256 Authenticated</span>
+                    <span>Encryption:</span>
+                    <span className="text-text-primary">Fernet (AES + HMAC-SHA256)</span>
                   </div>
                 </div>
 
@@ -1142,11 +1176,10 @@ export const SettingsPage: React.FC = () => {
                   variant="primary"
                   size="sm"
                   onClick={handleExportUsbBundle}
-                  disabled={!usbMounted || isProcessingUsb}
                   className="w-full text-xs font-semibold"
                 >
                   <HardDrive className="w-3.5 h-3.5 mr-1.5" />
-                  {isProcessingUsb ? 'Encrypting & Packaging...' : 'Export Encrypted Bundle (.ibvap.enc)'}
+                  {usbActionStatus === 'EXPORT' ? 'Hide export command' : 'Show export command'}
                 </Button>
               </div>
             </Card>
@@ -1165,16 +1198,16 @@ export const SettingsPage: React.FC = () => {
               <div className="space-y-3 pt-2">
                 <div className="p-2.5 rounded bg-bg-surface border border-border-subtle text-[11px] space-y-1">
                   <div className="flex justify-between text-text-dim">
-                    <span>Available Bundle:</span>
-                    <span className="text-accent-green font-bold">hq_update_v2.4.ibvap.enc</span>
+                    <span>Input:</span>
+                    <span className="text-text-primary">a bundle from the export script</span>
                   </div>
                   <div className="flex justify-between text-text-dim">
-                    <span>Seed-Once DB Policy:</span>
-                    <span className="text-text-primary">Preserves local BOP tuning</span>
+                    <span>Installs into:</span>
+                    <span className="text-text-primary">database/</span>
                   </div>
                   <div className="flex justify-between text-text-dim">
-                    <span>Origin:</span>
-                    <span className="text-text-dim">Sector HQ Punjab Cyber Wing</span>
+                    <span>Afterwards:</span>
+                    <span className="text-text-dim">restart the pipeline</span>
                   </div>
                 </div>
 
@@ -1182,11 +1215,10 @@ export const SettingsPage: React.FC = () => {
                   variant="secondary"
                   size="sm"
                   onClick={handleImportUsbBundle}
-                  disabled={!usbMounted || isProcessingUsb}
                   className="w-full text-xs font-semibold text-accent-green border-accent-green/40 hover:bg-accent-green/20"
                 >
                   <CheckCircle2 className="w-3.5 h-3.5 mr-1.5" />
-                  {isProcessingUsb ? 'Verifying HMAC Signature...' : 'Verify & Apply USB Bundle'}
+                  {usbActionStatus === 'IMPORT' ? 'Hide import command' : 'Show import command'}
                 </Button>
               </div>
             </Card>

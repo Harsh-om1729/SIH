@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { camerasApi, cameraStreamUrl } from '@/lib/api';
+import { ApiCamera, camerasApi, cameraStreamUrl } from '@/lib/api';
+import { describeCamera, useSystemHealth } from '@/components/system/SystemHealthProvider';
 import { CameraTile } from '@/components/live';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
@@ -13,101 +14,33 @@ import {
   Radio,
   Layers,
   Plus,
-  Tv,
   CheckCircle2,
   AlertCircle,
 } from 'lucide-react';
 
-export interface CameraItem {
-  id: string;
-  name: string;
-  location: string;
-  sector: string;
-  streamUrl?: string;
-  fps: string;
-  activity: string;
-  isActive: boolean;
-  resolution?: string;
+export interface CameraItem extends Omit<ApiCamera, 'activityGate' | 'lowLightBoost'> {
   activityGate?: 'HIGH' | 'LOW';
   lowLightBoost?: boolean;
 }
 
-const initialCameras: CameraItem[] = [
-  {
-    id: 'cam0',
-    name: 'cam0',
-    location: 'North Perimeter Gate',
-    sector: 'North Border Sector',
-    fps: '29.8',
-    activity: 'MOTION',
-    isActive: true,
-    resolution: '1920x1080',
-    activityGate: 'HIGH',
-    lowLightBoost: false,
-  },
-  {
-    id: 'cam1',
-    name: 'cam1',
-    location: 'East Checkpoint Bravo',
-    sector: 'East Border Sector',
-    fps: '30.0',
-    activity: 'STANDBY',
-    isActive: true,
-    resolution: '1920x1080',
-    activityGate: 'LOW',
-    lowLightBoost: false,
-  },
-  {
-    id: 'cam2',
-    name: 'cam2',
-    location: 'South Fence Line',
-    sector: 'South Perimeter',
-    fps: '28.4',
-    activity: 'ACTIVE',
-    isActive: true,
-    resolution: '1920x1080',
-    activityGate: 'HIGH',
-    lowLightBoost: false,
-  },
-  {
-    id: 'cam3',
-    name: 'cam3',
-    location: 'West Watchtower Alpha',
-    sector: 'West Mountain Sector',
-    fps: '29.5',
-    activity: 'NIGHT_IR',
-    isActive: true,
-    resolution: '1920x1080',
-    activityGate: 'HIGH',
-    lowLightBoost: true,
-  },
-];
-
-const CAMERAS_STORAGE_KEY = 'ibvap_cameras_data_v3';
-
-const loadStoredCameras = (): CameraItem[] => {
-  try {
-    const saved = localStorage.getItem(CAMERAS_STORAGE_KEY);
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.map((cam: any, idx: number) => ({
-          ...cam,
-          resolution: cam.resolution || '1920x1080',
-          activityGate: cam.activityGate || (idx === 1 ? 'LOW' : 'HIGH'),
-          lowLightBoost: cam.lowLightBoost ?? (idx === 3),
-        }));
-      }
-    }
-  } catch (e) {
-    console.error('Failed to load cameras from storage', e);
-  }
-  return initialCameras;
-};
+const LEGACY_CAMERAS_STORAGE_KEY = 'ibvap_cameras_data_v3';
 
 
 export const LiveFeedsPage: React.FC = () => {
-  const [cameras, setCameras] = useState<CameraItem[]>(loadStoredCameras);
+  // One source of truth for cameras and their live status, shared with the
+  // topbar, sidebar and dashboard (components/system/SystemHealthProvider).
+  const { cameras: apiCameras, health, reachable, refresh } = useSystemHealth();
+  const cameras: CameraItem[] = useMemo(
+    () =>
+      apiCameras.map((c) => ({
+        ...c,
+        streamUrl: cameraStreamUrl(c.id),
+        activityGate: c.activityGate ?? undefined,
+        lowLightBoost: c.lowLightBoost ?? undefined,
+      })),
+    [apiCameras]
+  );
+  const serverNow = health?.checkedAt ?? null;
   const [viewMode, setViewMode] = useState<'grid' | 'focus'>('grid');
   const [gridColumns, setGridColumns] = useState<'2' | '3'>('2');
   const [focusedCameraId, setFocusedCameraId] = useState<string>('cam0');
@@ -116,43 +49,14 @@ export const LiveFeedsPage: React.FC = () => {
   const [searchParams] = useSearchParams();
   const urlCamera = searchParams.get('camera');
 
-  // Replace the seeded demo tiles with whatever the backend actually has on
-  // CAMERA_SOURCES. Guarded on isFallback: safeFetch resolves successfully
-  // with mock data when the API is down, and overwriting real tiles with
-  // that would be worse than leaving the last known list in place.
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      const res = await camerasApi.getCameras([]);
-      if (cancelled || res.isFallback || !res.data || res.data.length === 0) return;
-      setCameras(
-        res.data.map((c) => ({
-          id: c.id,
-          name: c.name,
-          location: c.location,
-          sector: c.sector,
-          streamUrl: cameraStreamUrl(c.id),
-          fps: c.fps,
-          activity: c.activity,
-          isActive: c.isActive,
-          resolution: c.resolution,
-        }))
-      );
-      setFocusedCameraId(res.data[0].id);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Automatically sync cameras to localStorage across routes and sessions
+  // Drop the camera list older builds cached, which held the invented tiles.
   useEffect(() => {
     try {
-      localStorage.setItem(CAMERAS_STORAGE_KEY, JSON.stringify(cameras));
-    } catch (e) {
-      console.error('Failed to persist cameras', e);
+      localStorage.removeItem(LEGACY_CAMERAS_STORAGE_KEY);
+    } catch {
+      // storage unavailable
     }
-  }, [cameras]);
+  }, []);
 
   // Auto-focus camera when requested via query parameter (e.g. from Detections / View Evidence)
   useEffect(() => {
@@ -193,11 +97,16 @@ export const LiveFeedsPage: React.FC = () => {
     }
     
     try {
-      await camerasApi.deleteCamera(camId);
-      const updated = cameras.filter((c) => c.id !== camId);
-      setCameras(updated);
+      const res = await camerasApi.deleteCamera(camId);
+      if (res.isFallback) {
+        // e.g. 409 for a camera defined in .env — it was removed from the
+        // grid anyway before, and came back on the next reload.
+        showToast(`Could not remove ${camId.toUpperCase()}: ${res.error ?? 'backend unreachable'}`);
+        return;
+      }
+      await refresh();
       if (focusedCameraId === camId) {
-        setFocusedCameraId(updated[0]?.id || 'cam0');
+        setFocusedCameraId(cameras.find((c) => c.id !== camId)?.id || 'cam0');
       }
       showToast(`Removed camera channel ${camId.toUpperCase()}`);
     } catch (err) {
@@ -252,17 +161,17 @@ export const LiveFeedsPage: React.FC = () => {
     };
 
     try {
+      // newCamera.streamUrl carries what the BACKEND opens (a device index
+      // like "0", or an rtsp:// URL); the tile's MJPEG URL is derived from
+      // the id once the backend lists the camera.
       const res = await camerasApi.addCamera(newCamera);
-      if (!res.isFallback && res.data) {
-        newCamera.id = res.data.id || newCamera.id;
-        // finalStreamUrl is what the BACKEND needs to open the device (a
-        // device index like "0", or an rtsp:// URL). What the tile needs is
-        // the MJPEG endpoint. Leaving the former here renders <img src="0">,
-        // i.e. a broken image on the freshly added camera.
-        newCamera.streamUrl = cameraStreamUrl(newCamera.id);
+      if (res.isFallback) {
+        // Previously the tile was added locally even when this failed, so
+        // the camera "appeared" and then vanished on the next reload.
+        setFormError(`Could not add the camera: ${res.error ?? 'backend unreachable'}`);
+        return;
       }
-      const updated = [...cameras, newCamera];
-      setCameras(updated);
+      await refresh();
       setIsAddModalOpen(false);
       showToast(`Camera ${cleanId.toUpperCase()} (${cleanLocation}) added successfully`);
     } catch (err) {
@@ -274,50 +183,10 @@ export const LiveFeedsPage: React.FC = () => {
     }
   };
 
-  // Quick batch add preset: adds 2 tactical outpost cameras at once
-  const handleBatchAddPreset = async () => {
-    const nextIdx = cameras.length;
-    const batch: CameraItem[] = [
-      {
-        id: `cam${nextIdx}`,
-        name: `cam${nextIdx}`,
-        location: `Checkpost ${String.fromCharCode(65 + nextIdx)} - Riverbank`,
-        sector: 'Riverine Border Zone',
-        fps: '0.0',
-        activity: '—',
-        isActive: true,
-        resolution: '1920x1080',
-      },
-      {
-        id: `cam${nextIdx + 1}`,
-        name: `cam${nextIdx + 1}`,
-        location: `BOP Echo - Road Intersection`,
-        sector: 'Highway Corridor Sector',
-        fps: '0.0',
-        activity: '—',
-        isActive: true,
-        resolution: '1920x1080',
-      },
-    ];
-
-    try {
-      for (const cam of batch) {
-        await camerasApi.addCamera(cam);
-      }
-      setCameras((prev) => [...prev, ...batch]);
-      setIsAddModalOpen(false);
-      showToast(`Batch added 2 outpost cameras: ${batch[0].id}, ${batch[1].id}`);
-    } catch (err) {
-      showToast(
-        `Failed to integrate batch cameras: ${err instanceof Error ? err.message : 'unknown error'}`
-      );
-    }
-  };
-
   const focusedCamera =
-    cameras.find((c) => c.id === focusedCameraId) || cameras[0] || initialCameras[0];
+    cameras.find((c) => c.id === focusedCameraId) || cameras[0];
 
-  const onlineCount = cameras.filter((c) => c.isActive).length;
+  const onlineCount = cameras.filter((c) => c.health === 'online' && c.source !== 'idle').length;
 
   return (
     <div className="space-y-5">
@@ -342,12 +211,16 @@ export const LiveFeedsPage: React.FC = () => {
 
           <span className="text-white/20">|</span>
 
-          <Badge variant="green" dot size="sm">
-            {cameras.length} CAMERAS · {onlineCount} ONLINE
+          <Badge
+            variant={cameras.length > 0 && onlineCount === cameras.length ? 'green' : 'yellow'}
+            dot
+            size="sm"
+          >
+            {cameras.length} CAMERAS · {onlineCount} LIVE
           </Badge>
 
           <span className="hidden sm:inline font-mono text-[11px] text-text-dim">
-            AUTO-RELOAD · RTSP POOL
+            {health?.pipeline.running ? 'AI PIPELINE RUNNING' : 'AI PIPELINE STOPPED — PREVIEW ONLY'}
           </span>
         </div>
 
@@ -434,8 +307,32 @@ export const LiveFeedsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* Main Surveillance View Area */}
-      {viewMode === 'grid' ? (
+      {/* Main Surveillance View Area — with no-camera / offline / loading states */}
+      {reachable === null && cameras.length === 0 ? (
+        <div role="status" className="card-3d p-10 border border-white/10 rounded-2xl text-center text-xs font-mono text-text-dim">
+          Loading cameras…
+        </div>
+      ) : reachable === false && cameras.length === 0 ? (
+        <div role="alert" className="card-3d p-10 border border-accent-red/40 bg-accent-red/5 rounded-2xl text-center space-y-2">
+          <AlertCircle className="w-6 h-6 text-accent-red mx-auto" />
+          <h3 className="text-sm font-semibold text-white">Backend unreachable</h3>
+          <p className="text-xs text-text-dim">Start it with ./run.sh up — this page reconnects on its own.</p>
+          <Button variant="secondary" size="sm" onClick={() => refresh()}>
+            Retry now
+          </Button>
+        </div>
+      ) : cameras.length === 0 ? (
+        <div className="card-3d p-10 border border-dashed border-white/15 rounded-2xl text-center space-y-2">
+          <Video className="w-6 h-6 text-text-muted mx-auto" />
+          <h3 className="text-sm font-semibold text-white">No cameras configured</h3>
+          <p className="text-xs text-text-dim">
+            Set CAMERA_SOURCES in .env (e.g. cam0=0 for the built-in webcam) or add one here.
+          </p>
+          <Button variant="primary" size="sm" leftIcon={<Plus className="w-4 h-4" />} onClick={handleOpenAddModal}>
+            Add Camera
+          </Button>
+        </div>
+      ) : viewMode === 'grid' ? (
         /* Responsive Camera Grid */
         <div
           className={`grid gap-4 ${
@@ -465,13 +362,21 @@ export const LiveFeedsPage: React.FC = () => {
                 activity={camera.activity}
                 activityGate={camera.activityGate}
                 lowLightBoost={camera.lowLightBoost}
+                source={camera.source}
+                health={camera.health}
+                zones={camera.zones}
+                detections={camera.detections}
+                maxTier={camera.maxTier}
+                resolution={camera.resolution}
+                lastFrameAt={camera.lastFrameAt}
+                serverNow={serverNow}
                 onToggleFocus={() => handleTileClick(camera.id)}
                 onRemove={() => handleRemoveCamera(camera.id)}
               />
             </div>
           ))}
         </div>
-      ) : (
+      ) : !focusedCamera ? null : (
 
         /* Single Camera Focus View */
         <div className="space-y-4">
@@ -490,7 +395,11 @@ export const LiveFeedsPage: React.FC = () => {
                     : 'bg-bg-surface text-text-dim border-border-subtle hover:text-text-primary hover:bg-bg-elevated'
                 }`}
               >
-                <span className="w-1.5 h-1.5 rounded-full bg-accent-green" />
+                <span
+                  className={`w-1.5 h-1.5 rounded-full ${
+                    cam.health === 'online' ? 'bg-accent-green' : cam.health === 'offline' ? 'bg-accent-red' : 'bg-accent-yellow'
+                  }`}
+                />
                 <span>{cam.name}</span>
                 <span className="text-[10px] text-text-muted hidden sm:inline">
                   ({cam.location})
@@ -510,6 +419,14 @@ export const LiveFeedsPage: React.FC = () => {
               activity={focusedCamera.activity}
               activityGate={focusedCamera.activityGate}
               lowLightBoost={focusedCamera.lowLightBoost}
+              source={focusedCamera.source}
+              health={focusedCamera.health}
+              zones={focusedCamera.zones}
+              detections={focusedCamera.detections}
+              maxTier={focusedCamera.maxTier}
+              resolution={focusedCamera.resolution}
+              lastFrameAt={focusedCamera.lastFrameAt}
+              serverNow={serverNow}
               isFocused={true}
               onToggleFocus={() => setViewMode('grid')}
               onRemove={() => handleRemoveCamera(focusedCamera.id)}
@@ -517,67 +434,67 @@ export const LiveFeedsPage: React.FC = () => {
             />
           </div>
 
-          {/* Quick Diagnostics Strip for Focused Camera */}
-          <div className="card-3d max-w-5xl mx-auto p-3.5 bg-[#090c12] border border-white/10 rounded-2xl grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono text-xs shadow-lg">
-            <div>
-              <span className="text-text-muted block text-[10px] uppercase">
-                Hardware Health
-              </span>
-              <span className="text-accent-green font-semibold flex items-center gap-1">
-                ONLINE · RTSP LIVE
-              </span>
-              <span className="text-[10px] text-text-dim">
-                Stream Latency: ~42ms
-              </span>
-            </div>
-            <div>
-              <span className="text-text-muted block text-[10px] uppercase">
-                Activity Gating
-              </span>
-              <span
-                className={`font-semibold flex items-center gap-1 ${
-                  focusedCamera.activityGate === 'HIGH'
-                    ? 'text-accent-green'
-                    : 'text-accent-yellow'
-                }`}
-              >
-                GATE: {focusedCamera.activityGate || 'HIGH'}
-              </span>
-              <span className="text-[10px] text-text-muted truncate block">
-                {focusedCamera.activityGate === 'HIGH'
-                  ? '30 FPS In-Motion'
-                  : 'Low FPS Keep-Alive (1/10)'}
-              </span>
-            </div>
-            <div>
-              <span className="text-text-muted block text-[10px] uppercase">
-                Preprocessing
-              </span>
-              <span
-                className={`flex items-center gap-1 ${
-                  focusedCamera.lowLightBoost
-                    ? 'text-accent-yellow font-medium'
-                    : 'text-text-dim'
-                }`}
-              >
-                {focusedCamera.lowLightBoost ? 'CLAHE BOOST ON' : 'STANDARD LUX'}
-              </span>
-              <span className="text-[10px] text-text-muted">
-                {focusedCamera.lowLightBoost ? 'Lux < 90 Boost' : 'Direct Sensor'}
-              </span>
-            </div>
-            <div>
-              <span className="text-text-muted block text-[10px] uppercase">
-                Threat Detection
-              </span>
-              <span className="text-text-dim flex items-center gap-1">
-                <Layers className="w-3 h-3 text-accent-yellow" /> 3 ZONES ACTIVE
-              </span>
-              <span className="text-[10px] text-accent-green flex items-center gap-1">
-                <Radio className="w-2.5 h-2.5" /> RTSP POOL OK
-              </span>
-            </div>
-          </div>
+          {/* Diagnostics for the focused camera — measured values only. This
+              strip used to state "~42ms latency", "3 ZONES ACTIVE" and
+              "RTSP POOL OK" for every camera. */}
+          {(() => {
+            const st = describeCamera(focusedCamera, reachable);
+            const tone = {
+              green: 'text-accent-green',
+              yellow: 'text-accent-yellow',
+              red: 'text-accent-red',
+              muted: 'text-text-dim',
+            }[st.tone];
+            const age =
+              serverNow != null && focusedCamera.lastFrameAt != null
+                ? serverNow - focusedCamera.lastFrameAt
+                : null;
+            return (
+              <div className="card-3d max-w-5xl mx-auto p-3.5 bg-[#090c12] border border-white/10 rounded-2xl grid grid-cols-2 sm:grid-cols-4 gap-3 font-mono text-xs shadow-lg">
+                <div>
+                  <span className="text-text-muted block text-[10px] uppercase">Status</span>
+                  <span className={`font-semibold ${tone}`}>{st.label}</span>
+                  <span className="text-[10px] text-text-dim block">
+                    {age != null
+                      ? `Last frame ${Math.max(0, age).toFixed(1)}s ago`
+                      : focusedCamera.source === 'pipeline'
+                      ? 'Waiting for frames'
+                      : 'Not being analysed'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-text-muted block text-[10px] uppercase">Activity gate</span>
+                  <span className="text-text-primary font-semibold">
+                    {focusedCamera.activityGate === 'HIGH'
+                      ? 'MOTION · full pipeline'
+                      : focusedCamera.activityGate === 'LOW'
+                      ? 'IDLE · keep-alive rate'
+                      : '—'}
+                  </span>
+                  <span className="text-[10px] text-text-muted block">Reported by the AI pipeline</span>
+                </div>
+                <div>
+                  <span className="text-text-muted block text-[10px] uppercase">Low-light</span>
+                  <span className={focusedCamera.lowLightBoost ? 'text-accent-yellow font-semibold' : 'text-text-dim'}>
+                    {focusedCamera.lowLightBoost == null ? '—' : focusedCamera.lowLightBoost ? 'BOOST ON' : 'Off'}
+                  </span>
+                  <span className="text-[10px] text-text-muted block">
+                    {focusedCamera.brightness != null ? `Brightness ${focusedCamera.brightness}` : 'Pipeline only'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-text-muted block text-[10px] uppercase">Border scoring</span>
+                  <span className={`flex items-center gap-1 ${focusedCamera.zones ? 'text-text-primary' : 'text-accent-yellow'}`}>
+                    <Layers className="w-3 h-3" /> {focusedCamera.zones ?? 0} zone{focusedCamera.zones === 1 ? '' : 's'}
+                  </span>
+                  <span className="text-[10px] text-text-muted flex items-center gap-1">
+                    <Radio className="w-2.5 h-2.5" />
+                    {focusedCamera.zones ? `${focusedCamera.detections ?? 0} target(s) in view` : 'Inactive — draw zones'}
+                  </span>
+                </div>
+              </div>
+            );
+          })()}
         </div>
       )}
 
@@ -591,14 +508,7 @@ export const LiveFeedsPage: React.FC = () => {
         size="md"
         footer={
           <div className="flex items-center justify-between w-full">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleBatchAddPreset}
-              leftIcon={<Tv className="w-3.5 h-3.5 text-accent-teal" />}
-            >
-              + Quick Add 2 Outposts
-            </Button>
+            <span />
 
             <div className="flex items-center gap-2">
               <Button

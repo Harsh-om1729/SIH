@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom';
 import { Menu, Clock, Volume2, VolumeX, BellOff } from 'lucide-react';
 import { AlertBell } from './AlertBell';
 import { useAlerts } from '@/components/alerts/AlertProvider';
+import { useSystemHealth } from '@/components/system/SystemHealthProvider';
 
 interface TopbarProps {
   onOpenMobileSidebar: () => void;
@@ -34,13 +35,37 @@ const routeTitles: Record<string, { title: string; subtitle: string }> = {
     title: 'Threat Intelligence Analytics',
     subtitle: 'Kinematics breakdown, peak curfew patterns, and sector metrics',
   },
+  '/watchlist': {
+    title: 'Watchlist',
+    subtitle: 'Enrolled faces the pipeline matches against in real time',
+  },
+  '/settings': {
+    title: 'System Health & Settings',
+    subtitle: 'Pipeline, cameras, models, storage, thresholds and integrations',
+  },
 };
 
-export const Topbar: React.FC<TopbarProps> = ({
-  onOpenMobileSidebar,
-  systemStatus = 'online',
-}) => {
+export const Topbar: React.FC<TopbarProps> = ({ onOpenMobileSidebar }) => {
   const { backendStatus, soundEnabled, toggleSound, popupsMuted, toggleMutePopups } = useAlerts();
+  const { cameras, health, reachable } = useSystemHealth();
+  const liveCams = cameras.filter((c) => c.health === 'online' && c.source !== 'idle').length;
+
+  // Every state here is measured. The pill used to read "Live Stream
+  // Pipeline · 4/4 Online" in green regardless of what was connected.
+  const pill =
+    reachable === false
+      ? { tone: 'text-accent-red', dot: 'bg-accent-red', text: 'Backend offline — no live data' }
+      : !health
+      ? { tone: 'text-text-dim', dot: 'bg-text-muted', text: 'Checking system…' }
+      : !health.pipeline.running
+      ? { tone: 'text-accent-yellow', dot: 'bg-accent-yellow', text: 'AI pipeline stopped · no alerts' }
+      : {
+          tone: health.status === 'ok' ? 'text-accent-green' : 'text-accent-yellow',
+          dot: health.status === 'ok' ? 'bg-accent-green' : 'bg-accent-yellow',
+          text: `AI live · ${liveCams}/${cameras.length} cameras · alerts ${
+            backendStatus === 'connected' ? 'connected' : 'reconnecting'
+          }`,
+        };
   const location = useLocation();
   const [currentTime, setCurrentTime] = useState<string>('');
 
@@ -93,15 +118,13 @@ export const Topbar: React.FC<TopbarProps> = ({
       </div>
 
       {/* Center: Status Pill (Clean, no ping animation) */}
-      <div className="hidden md:flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#0a0d14] border border-[#1d2232] text-xs font-semibold text-accent-green">
-        <span className="inline-flex rounded-full h-2 w-2 bg-accent-green" />
-        <span>
-          {backendStatus === 'connected'
-            ? 'Live Stream Pipeline · 4/4 Online'
-            : systemStatus === 'online'
-            ? 'Active Monitoring · 4 Cameras Online'
-            : 'Standby Mode · Offline'}
-        </span>
+      <div
+        role="status"
+        aria-live="polite"
+        className={`hidden md:flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-[#0a0d14] border border-[#1d2232] text-xs font-semibold ${pill.tone}`}
+      >
+        <span className={`inline-flex rounded-full h-2 w-2 ${pill.dot}`} />
+        <span>{pill.text}</span>
       </div>
 
       {/* Right: Quick Actions */}

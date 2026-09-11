@@ -17,6 +17,9 @@ export interface ApiResponse<T> {
   data: T | null;
   error: string | null;
   isFallback: boolean;
+  // HTTP status when the server answered, null when it could not be reached.
+  // Lets a caller tell "backend offline" apart from "backend said no".
+  status: number | null;
 }
 
 export async function safeFetch<T>(
@@ -43,11 +46,26 @@ export async function safeFetch<T>(
     clearTimeout(timeoutId);
 
     if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+      // FastAPI puts the useful message in `detail` ("No face found in that
+      // photo", "reason must be one of ..."). statusText alone just said
+      // "Unprocessable Entity".
+      let detail = response.statusText;
+      try {
+        const body = await response.json();
+        if (body && typeof body.detail === 'string') detail = body.detail;
+      } catch {
+        // non-JSON error body; keep statusText
+      }
+      return {
+        data: fallbackData !== undefined ? fallbackData : null,
+        error: `HTTP ${response.status}: ${detail}`,
+        isFallback: true,
+        status: response.status,
+      };
     }
 
     const data = (await response.json()) as T;
-    return { data, error: null, isFallback: false };
+    return { data, error: null, isFallback: false, status: response.status };
   } catch (err: unknown) {
     clearTimeout(timeoutId);
     const message = err instanceof Error ? err.message : 'Network request failed';
@@ -55,6 +73,7 @@ export async function safeFetch<T>(
       data: fallbackData !== undefined ? fallbackData : null,
       error: message,
       isFallback: true,
+      status: null,
     };
   }
 }

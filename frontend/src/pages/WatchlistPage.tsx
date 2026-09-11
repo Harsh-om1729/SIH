@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import {
   WatchlistPerson,
-  initialMockWatchlist,
   generateBiometricAvatarSvg,
 } from '@/lib/mockWatchlist';
 import { Card } from '@/components/ui/Card';
@@ -38,7 +37,7 @@ const loadStoredWatchlist = (): WatchlistPerson[] => {
   } catch (e) {
     console.error('Failed to load watchlist from storage', e);
   }
-  return initialMockWatchlist;
+  return [];
 };
 
 export const WatchlistPage: React.FC = () => {
@@ -128,13 +127,6 @@ export const WatchlistPage: React.FC = () => {
     }
   };
 
-  // Preset Avatar generator for convenience
-  const handleUsePresetAvatar = () => {
-    const tempId = Date.now() % 1000;
-    const generated = generateBiometricAvatarSvg(formName || 'Subject', tempId, 0);
-    setPreviewPhotoUrl(generated);
-    setFormError('');
-  };
 
   const handleOpenAddModal = () => {
     setFormName('');
@@ -303,7 +295,7 @@ export const WatchlistPage: React.FC = () => {
                     {/* Rounded Photo */}
                     <div className="relative w-16 h-16 rounded-md overflow-hidden bg-bg-primary border border-border-subtle shrink-0 group">
                       <img
-                        src={person.photoUrl}
+                        src={person.photoUrl || generateBiometricAvatarSvg(person.name, person.id, person.matchCount)}
                         alt={`Photo of ${person.name}`}
                         className="w-full h-full object-cover"
                       />
@@ -506,14 +498,6 @@ export const WatchlistPage: React.FC = () => {
                       className="sr-only"
                     />
                   </label>
-                  <span className="text-xs text-text-muted"> or </span>
-                  <button
-                    type="button"
-                    onClick={handleUsePresetAvatar}
-                    className="text-xs text-text-primary hover:underline font-mono"
-                  >
-                    Use Tactical Face Preset
-                  </button>
                 </div>
                 <p className="text-[10px] text-text-dim mt-1">
                   PNG, JPG, or WEBP portrait (clear frontal view recommended)

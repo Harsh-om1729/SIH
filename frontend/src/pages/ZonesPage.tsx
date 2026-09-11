@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Zone, initialMockZones } from '@/lib/mockZones';
+import type { Zone } from '@/lib/mockZones';
+import { useSystemHealth } from '@/components/system/SystemHealthProvider';
 import { zonesApi } from '@/lib/api';
 import { DataSourceBadge } from '@/components/ui/DataSourceBadge';
 import { ZONE_PRESETS, ZonePreset } from '@/lib/zonePresets';
@@ -40,7 +41,7 @@ const loadStoredZones = (): Zone[] => {
   } catch (e) {
     console.error('Failed to load zones from storage', e);
   }
-  return initialMockZones;
+  return [];
 };
 
 export const ZonesPage: React.FC = () => {
@@ -226,36 +227,38 @@ export const ZonesPage: React.FC = () => {
     showToast('Zones written to the backend — restart the pipeline to apply them');
   };
 
-  const handleResetDefaults = () => {
-    setAllZones(initialMockZones);
+  // "Reload saved zones": discard unsaved edits and re-read what the pipeline
+  // actually uses. This used to load a demo layout for four invented cameras,
+  // one "Save Zones" click away from being written into the real config.
+  const handleResetDefaults = async () => {
+    const res = await zonesApi.getZones({});
     setSelectedZoneId(null);
     setIsClearModalOpen(false);
-    try {
-      localStorage.setItem(ZONES_STORAGE_KEY, JSON.stringify(initialMockZones));
-    } catch (e) {
-      console.error(e);
+    if (res.isFallback || !res.data) {
+      showToast(`Could not reload zones: ${res.error ?? 'backend unreachable'}`);
+      return;
     }
-    showToast('Zones restored to default factory layout');
+    setAllZones(Object.values(res.data).flat() as Zone[]);
+    setIsMock(false);
+    showToast('Reloaded the zones saved on the backend — unsaved edits discarded');
   };
 
+  // Cameras the backend actually has (CAMERA_SOURCES + dashboard-added), plus
+  // any camera that already has zones. This was a fixed cam0-cam3 list merged
+  // with a stale localStorage key, so zones could be drawn for cameras that
+  // do not exist and would never be read by the pipeline.
+  const { cameras: apiCameras } = useSystemHealth();
   const availableCameras = useMemo(() => {
-    const baseCams = ['cam0', 'cam1', 'cam2', 'cam3'];
-    const zoneCams = allZones.map((z) => z.cameraName);
-    let registeredCams: string[] = [];
-    try {
-      const storedCams = localStorage.getItem('ibvap_cameras_data');
-      if (storedCams) {
-        const parsed = JSON.parse(storedCams);
-        if (Array.isArray(parsed)) {
-          registeredCams = parsed.map((c: { id: string }) => c.id);
-        }
-      }
-    } catch {
-      // ignore
+    const ids = [...apiCameras.map((c) => c.id), ...allZones.map((z) => z.cameraName)];
+    return Array.from(new Set(ids)).sort();
+  }, [apiCameras, allZones]);
+
+  // Keep the selection on a camera that exists once the list arrives.
+  useEffect(() => {
+    if (availableCameras.length > 0 && !availableCameras.includes(selectedCamera)) {
+      setSelectedCamera(availableCameras[0]);
     }
-    const combined = Array.from(new Set([...baseCams, ...zoneCams, ...registeredCams]));
-    return combined.sort();
-  }, [allZones]);
+  }, [availableCameras, selectedCamera]);
 
   // Other cameras that currently have at least 1 zone configured
   const otherCamerasWithZones = useMemo(() => {
@@ -941,7 +944,7 @@ export const ZonesPage: React.FC = () => {
               leftIcon={<RotateCcw className="w-3.5 h-3.5 text-accent-teal" />}
               onClick={handleResetDefaults}
             >
-              Reset to Defaults
+              Reload Saved Zones
             </Button>
             <div className="flex items-center gap-2">
               <Button variant="ghost" size="sm" onClick={() => setIsClearModalOpen(false)}>

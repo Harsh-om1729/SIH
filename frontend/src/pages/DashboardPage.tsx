@@ -5,6 +5,7 @@ import { incidentsApi } from '@/lib/api';
 import { useBackendData } from '@/lib/useBackendData';
 import { DataSourceBadge } from '@/components/ui/DataSourceBadge';
 import { useAlerts } from '@/components/alerts/AlertProvider';
+import { describeCamera, useSystemHealth } from '@/components/system/SystemHealthProvider';
 import {
   getDashboardStats,
   getHourlyThreatTimeline,
@@ -34,7 +35,6 @@ import {
   Car,
   HelpCircle,
   Radio,
-  Zap,
 } from 'lucide-react';
 
 // Custom Minimal Dark Tooltip for 24H Chart
@@ -142,17 +142,12 @@ const RenderRealtimeDot = (props: any) => {
   );
 };
 
-const mockCameras = [
-  { id: 'cam0', name: 'Camera 01', location: 'North Perimeter Gate', fps: '30.0', status: 'online' },
-  { id: 'cam1', name: 'Camera 02', location: 'East Checkpoint Bravo', fps: '30.0', status: 'online' },
-  { id: 'cam2', name: 'Camera 03', location: 'South Fence Line', fps: '28.4', status: 'online' },
-  { id: 'cam3', name: 'Camera 04', location: 'West Watchtower Alpha', fps: '30.2', status: 'online' },
-];
 
 
 export const DashboardPage: React.FC = () => {
   const navigate = useNavigate();
-  const { alerts, triggerDemoAlert } = useAlerts();
+  const { alerts, backendStatus } = useAlerts();
+  const { health, cameras, reachable } = useSystemHealth();
   const {
     data: stored,
     isMock,
@@ -164,7 +159,9 @@ export const DashboardPage: React.FC = () => {
   const activeAlerts = React.useMemo(() => {
     const byId = new Map<number, Incident>();
     for (const i of stored) byId.set(i.id, i);
-    for (const a of alerts) byId.set(a.id, a);
+    // Fetched rows win: they carry operator actions (acknowledged, resolved)
+    // that the WebSocket copy of the same alert predates.
+    for (const a of alerts) if (!byId.has(a.id)) byId.set(a.id, a);
     return Array.from(byId.values()).sort((a, b) => b.id - a.id);
   }, [stored, alerts]);
 
@@ -176,6 +173,18 @@ export const DashboardPage: React.FC = () => {
   const timelineData = getHourlyThreatTimeline(activeAlerts);
   const realtimeStream = getRealtimeThreatStream(activeAlerts, 14);
   const latestAlert = activeAlerts[0];
+
+  // Operator-facing counts. health.database is exact across all history; the
+  // loaded list (the most recent 500) is the stand-in until it arrives.
+  const openList = activeAlerts.filter((i) => (i.status ?? 'open') === 'open');
+  const openTotal = health?.database.open ?? openList.length;
+  const openRed = health?.database.openRed ?? openList.filter((i) => i.tier === 'red').length;
+  const openYellow = openList.filter((i) => i.tier === 'yellow').length;
+  const liveCams = cameras.filter((c) => c.health === 'online' && c.source !== 'idle').length;
+  const pipelineRunning = Boolean(health?.pipeline.running);
+  const camsWithoutZones = health
+    ? Object.entries(health.zones).filter(([, n]) => n === 0).map(([id]) => id)
+    : [];
 
   // Top 5 most recent critical / high-threat alert detections, real-time synchronized
   const recentCriticalAlerts = activeAlerts
@@ -201,44 +210,50 @@ export const DashboardPage: React.FC = () => {
           <h2 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
             <span>Surveillance Overview</span>
             <DataSourceBadge isMock={isMock} error={error} />
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-[#101624] text-accent-teal border border-accent-teal/30">
-              LIVE TELEMETRY
-            </span>
           </h2>
           <p className="text-xs text-text-dim mt-0.5">
-            Real-time perimeter telemetry & threat detection pipeline
+            Open alerts, camera status and the AI pipeline at a glance
           </p>
         </div>
 
-        {/* Real-time alert synchronization indicator & Demo Test Controls */}
-        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto">
-          <div className="flex items-center gap-2 text-xs text-text-dim bg-[#0a0d14] px-3 py-1.5 rounded-lg border border-[#161924] font-mono">
-            <span className="w-2 h-2 rounded-full bg-accent-green" />
-            <span>REALTIME SYNC ACTIVE</span>
-          </div>
-
-          <div className="flex items-center gap-1 bg-[#0a0d14] p-1 rounded-lg border border-[#161924]">
-            <span className="text-[10px] font-mono text-text-muted px-1.5 flex items-center gap-1">
-              <Zap className="w-3 h-3 text-accent-yellow" />
-              TEST SYNC:
-            </span>
-            <button
-              onClick={() => triggerDemoAlert('yellow')}
-              title="Trigger Caution Alert and watch graph update in real-time"
-              className="px-2 py-0.5 rounded bg-accent-yellow/15 text-accent-yellow hover:bg-accent-yellow/25 border border-accent-yellow/30 font-mono text-[10px] font-semibold transition-colors"
-            >
-              + Caution
-            </button>
-            <button
-              onClick={() => triggerDemoAlert('red')}
-              title="Trigger Critical Alert and watch graph update in real-time"
-              className="px-2 py-0.5 rounded bg-accent-red/15 text-accent-red hover:bg-accent-red/25 border border-accent-red/30 font-mono text-[10px] font-semibold transition-colors"
-            >
-              + Critical
-            </button>
-          </div>
+        {/* Measured status — the old indicator was a fixed green "REALTIME
+            SYNC ACTIVE", next to buttons that injected fabricated alerts. */}
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-auto text-xs font-mono">
+          <span className="flex items-center gap-2 bg-[#0a0d14] px-3 py-1.5 rounded-lg border border-[#161924]">
+            <span className={`w-2 h-2 rounded-full ${pipelineRunning ? 'bg-accent-green' : 'bg-accent-yellow'}`} />
+            {pipelineRunning ? 'AI PIPELINE RUNNING' : 'AI PIPELINE STOPPED'}
+          </span>
+          <span className="flex items-center gap-2 bg-[#0a0d14] px-3 py-1.5 rounded-lg border border-[#161924]">
+            <span className={`w-2 h-2 rounded-full ${backendStatus === 'connected' ? 'bg-accent-green' : 'bg-accent-yellow'}`} />
+            {backendStatus === 'connected' ? 'ALERT FEED LIVE' : 'ALERT FEED RECONNECTING'}
+          </span>
         </div>
       </div>
+
+      {/* Conditions an operator must know about before trusting the numbers */}
+      {(reachable === false || isMock) && (
+        <div role="alert" className="p-3 rounded-xl border border-accent-red/40 bg-accent-red/10 text-xs font-mono text-accent-red">
+          Backend unreachable — no live data is shown. Start it with ./run.sh up; this page recovers
+          automatically once the API answers.
+        </div>
+      )}
+      {reachable && health && !pipelineRunning && (
+        <div role="status" className="p-3 rounded-xl border border-accent-yellow/40 bg-accent-yellow/10 text-xs font-mono text-accent-yellow">
+          The AI pipeline is not running: cameras are not being analysed and no new alerts will be
+          raised. Start it with ./run.sh (or ./run.sh all for everything).
+        </div>
+      )}
+      {reachable && pipelineRunning && camsWithoutZones.length > 0 && (
+        <div role="status" className="p-3 rounded-xl border border-accent-yellow/40 bg-accent-yellow/10 text-xs font-mono text-accent-yellow flex flex-wrap items-center justify-between gap-2">
+          <span>
+            No zones on {camsWithoutZones.join(', ').toUpperCase()}: border scoring (sector, crossing
+            direction, loitering) is inactive there and alerts cannot reach RED.
+          </span>
+          <Button variant="secondary" size="sm" onClick={() => navigate('/zones')}>
+            Draw zones
+          </Button>
+        </div>
+      )}
 
       {/* 1. Row of 4 KPI Stat Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -247,13 +262,13 @@ export const DashboardPage: React.FC = () => {
           <div className="flex items-start justify-between">
             <div className="space-y-1">
               <span className="text-xs font-semibold text-text-dim uppercase tracking-wider block">
-                Total Events
+                Open Incidents
               </span>
               <span className="text-3xl font-bold tracking-tight text-white block">
-                {stats.totalIncidents}
+                {openTotal}
               </span>
-              <span className="text-[11px] text-text-muted flex items-center gap-1 font-medium">
-                <span className="text-accent-teal font-semibold">Live</span> synchronized count
+              <span className="text-[11px] text-text-muted font-medium">
+                Awaiting acknowledgement · {health?.database.total ?? stats.totalIncidents} recorded
               </span>
             </div>
             <div className="w-10 h-10 rounded-xl bg-[#0e121c] border border-white/10 text-accent-teal flex items-center justify-center">
@@ -270,10 +285,10 @@ export const DashboardPage: React.FC = () => {
                 Critical Threats
               </span>
               <span className="text-3xl font-bold tracking-tight text-accent-red block">
-                {stats.redAlerts}
+                {openRed}
               </span>
               <span className="text-[11px] text-accent-red/80 font-medium">
-                Immediate dispatch tier
+                Open RED — immediate response
               </span>
             </div>
             <div className="w-10 h-10 rounded-xl bg-[#0e121c] border border-white/10 text-accent-red flex items-center justify-center">
@@ -290,10 +305,10 @@ export const DashboardPage: React.FC = () => {
                 Caution Alerts
               </span>
               <span className="text-3xl font-bold tracking-tight text-accent-yellow block">
-                {stats.yellowAlerts}
+                {openYellow}
               </span>
               <span className="text-[11px] text-text-muted font-medium">
-                Active tracking in progress
+                Open YELLOW in the loaded history
               </span>
             </div>
             <div className="w-10 h-10 rounded-xl bg-[#0e121c] border border-white/10 text-accent-yellow flex items-center justify-center">
@@ -307,14 +322,19 @@ export const DashboardPage: React.FC = () => {
           <div className="flex items-start justify-between">
             <div className="space-y-1">
               <span className="text-xs font-semibold text-text-dim uppercase tracking-wider block">
-                Active Cameras
+                Cameras Live
               </span>
-              <span className="text-3xl font-bold tracking-tight text-accent-green block">
-                {stats.activeCameras} / 4
+              <span className={`text-3xl font-bold tracking-tight block ${
+                cameras.length > 0 && liveCams === cameras.length ? 'text-accent-green' : 'text-accent-yellow'
+              }`}>
+                {liveCams} / {cameras.length}
               </span>
-              <span className="text-[11px] text-accent-green font-medium flex items-center gap-1.5">
-                <span className="w-1.5 h-1.5 rounded-full bg-accent-green inline-block" />
-                All channels live
+              <span className="text-[11px] text-text-muted font-medium">
+                {reachable === false
+                  ? 'Backend offline — status unknown'
+                  : pipelineRunning
+                  ? 'Analysed by the AI pipeline'
+                  : 'Pipeline stopped — not analysed'}
               </span>
             </div>
             <div className="w-10 h-10 rounded-xl bg-[#0e121c] border border-white/10 text-accent-green flex items-center justify-center">
@@ -333,9 +353,6 @@ export const DashboardPage: React.FC = () => {
             <div className="flex items-center gap-2">
               <Radio className="w-4 h-4 text-accent-teal" />
               <span>Threat Activity Graph</span>
-              <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-accent-green/10 text-accent-green border border-accent-green/30">
-                REAL-TIME SYNC
-              </span>
             </div>
           }
           subtitle={
@@ -387,10 +404,12 @@ export const DashboardPage: React.FC = () => {
           {/* Synchronized Alert Status Banner */}
           <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-1.5 mb-2 rounded-lg bg-[#07090f] border border-[#161924] text-xs font-mono">
             <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-accent-green" />
-              <span className="text-accent-green font-semibold">SYNCHRONIZED WITH ALERT PIPELINE</span>
+              <span className={`w-2 h-2 rounded-full ${backendStatus === 'connected' ? 'bg-accent-green' : 'bg-accent-yellow'}`} />
+              <span className={`font-semibold ${backendStatus === 'connected' ? 'text-accent-green' : 'text-accent-yellow'}`}>
+                {backendStatus === 'connected' ? 'NEW ALERTS APPEAR LIVE' : 'ALERT FEED RECONNECTING'}
+              </span>
               <span className="text-text-dim text-[11px]">
-                ({activeAlerts.length} total events tracked)
+                ({activeAlerts.length} incidents loaded)
               </span>
             </div>
             {latestAlert && (
@@ -525,14 +544,18 @@ export const DashboardPage: React.FC = () => {
           </div>
         </Card>
 
-        {/* Camera Status Mini-Grid (4 cols) */}
+        {/* Camera Status Mini-Grid (4 cols) — real cameras, measured status */}
         <Card
           className="lg:col-span-4 flex flex-col justify-between"
           title="Camera Feeds"
-          subtitle="Real-time optical & IR sensor connectivity"
+          subtitle={pipelineRunning ? 'Analysed by the AI pipeline' : 'AI pipeline stopped — preview only'}
           action={
-            <Badge variant="green" dot size="sm">
-              4 Online
+            <Badge
+              variant={cameras.length > 0 && liveCams === cameras.length ? 'green' : 'yellow'}
+              dot
+              size="sm"
+            >
+              {liveCams}/{cameras.length} live
             </Badge>
           }
           footer={
@@ -548,37 +571,48 @@ export const DashboardPage: React.FC = () => {
           }
         >
           <div className="space-y-2.5">
-            {mockCameras.map((cam) => (
-              <div
-                key={cam.id}
-                onClick={() => navigate(`/live?camera=${cam.id}`)}
-                className="p-3 rounded-xl bg-[#090c12] border border-white/[0.06] hover:border-white/20 transition-colors flex items-center justify-between cursor-pointer group"
-              >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div className="w-8 h-8 rounded-lg bg-[#0e121c] border border-white/10 flex items-center justify-center text-accent-teal group-hover:text-white transition-colors shrink-0">
-                    <Video className="w-4 h-4" />
-                  </div>
-                  <div className="min-w-0 space-y-0.5">
-                    <div className="flex items-center gap-1.5">
-                      <span className="text-xs font-semibold text-white truncate">
-                        {cam.name}
-                      </span>
-                    </div>
-                    <span className="text-[11px] text-text-dim truncate block">
-                      {cam.location}
-                    </span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className="text-[11px] font-mono text-accent-teal font-semibold">
-                    {cam.fps} FPS
-                  </span>
-                  <span className="inline-flex rounded-full h-2 w-2 bg-accent-green" />
-                </div>
+            {cameras.length === 0 ? (
+              <div className="p-4 text-center text-xs text-text-dim font-mono">
+                {reachable === false
+                  ? 'Backend offline — camera status unknown.'
+                  : 'No cameras configured. Set CAMERA_SOURCES in .env or use Live Feeds → Add Camera.'}
               </div>
-
-            ))}
+            ) : (
+              cameras.map((cam) => {
+                const st = describeCamera(cam, reachable);
+                const dot = {
+                  green: 'bg-accent-green',
+                  yellow: 'bg-accent-yellow',
+                  red: 'bg-accent-red',
+                  muted: 'bg-text-muted',
+                }[st.tone];
+                return (
+                  <button
+                    type="button"
+                    key={cam.id}
+                    onClick={() => navigate(`/live?camera=${cam.id}`)}
+                    className="w-full text-left p-3 rounded-xl bg-[#090c12] border border-white/[0.06] hover:border-white/20 transition-colors flex items-center justify-between gap-2 group"
+                  >
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="w-8 h-8 rounded-lg bg-[#0e121c] border border-white/10 flex items-center justify-center text-accent-teal shrink-0">
+                        <Video className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0 space-y-0.5">
+                        <span className="text-xs font-semibold text-white truncate block uppercase">{cam.name}</span>
+                        <span className="text-[11px] text-text-dim truncate block">{cam.location}</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0 text-[11px] font-mono">
+                      {cam.source !== 'idle' && (
+                        <span className="text-accent-teal font-semibold">{cam.fps} FPS</span>
+                      )}
+                      <span className="text-text-dim hidden xl:inline">{st.label}</span>
+                      <span className={`inline-flex rounded-full h-2 w-2 ${dot}`} aria-label={st.label} />
+                    </div>
+                  </button>
+                );
+              })
+            )}
           </div>
         </Card>
       </div>
@@ -589,12 +623,9 @@ export const DashboardPage: React.FC = () => {
           <div className="flex items-center gap-2">
             <ShieldAlert className="w-4 h-4 text-accent-red" />
             <span className="text-sm font-bold tracking-tight">Recent Critical Alerts</span>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-accent-teal/10 text-accent-teal border border-accent-teal/30">
-              SYNCHRONIZED
-            </span>
           </div>
         }
-        subtitle="Priority target detections coordinated with live notification pipeline"
+        subtitle="Most recent caution and critical alerts — open one for evidence and actions"
         action={
           <Button
             variant="secondary"
@@ -616,7 +647,7 @@ export const DashboardPage: React.FC = () => {
             recentCriticalAlerts.map((alert) => (
               <div
                 key={alert.id}
-                onClick={() => navigate(`/live?camera=${alert.cameraName}`)}
+                onClick={() => navigate(`/detections?incident=${alert.id}`)}
                 className="p-3 bg-[#090c12] border border-white/[0.06] border-l-2 border-l-accent-red hover:border-white/20 transition-colors rounded-xl flex flex-col md:flex-row md:items-center justify-between gap-2.5 cursor-pointer group"
               >
                 {/* Left: Status Badge, Time, Camera, Target Type Badge, Track ID */}
@@ -681,7 +712,7 @@ export const DashboardPage: React.FC = () => {
                   <button
                     onClick={(e) => {
                       e.stopPropagation();
-                      navigate(`/live?camera=${alert.cameraName}`);
+                      navigate(`/detections?incident=${alert.id}`);
                     }}
                     className="px-2.5 py-1 rounded bg-white/[0.04] hover:bg-white/[0.08] text-text-dim hover:text-white border border-white/10 transition-colors font-mono text-[10px] font-semibold flex items-center gap-1"
                   >

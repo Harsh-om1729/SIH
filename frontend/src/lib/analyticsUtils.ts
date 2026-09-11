@@ -61,9 +61,13 @@ export function getDashboardStats(incidents: Incident[] = mockIncidents): Dashbo
   const redAlerts = incidents.filter((i) => i.tier === 'red').length;
   const yellowAlerts = incidents.filter((i) => i.tier === 'yellow').length;
   
-  // Unique cameras present
-  const cams = new Set(incidents.map((i) => i.cameraName));
-  const activeCameras = Math.max(cams.size, 4);
+  // Distinct cameras that produced incidents. This is NOT "cameras online" —
+  // that comes from /system/health. It used to be Math.max(size, 4), which
+  // could never report fewer than four cameras whatever was connected.
+  const cams = new Set(
+    incidents.map((i) => i.cameraName).filter((c) => c && c !== 'unknown')
+  );
+  const activeCameras = cams.size;
 
   return {
     totalIncidents,

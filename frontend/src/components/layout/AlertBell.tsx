@@ -10,7 +10,6 @@ import {
   User,
   Car,
   HelpCircle,
-  Zap,
 } from 'lucide-react';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -22,7 +21,6 @@ export const AlertBell: React.FC = () => {
     unreadCount,
     markAllAsRead,
     acknowledgeAlert,
-    triggerDemoAlert,
     popupsMuted,
     toggleMutePopups,
   } = useAlerts();
@@ -126,28 +124,6 @@ export const AlertBell: React.FC = () => {
                   Clear
                 </button>
               )}
-            </div>
-          </div>
-
-          {/* Quick Demo Simulator Bar */}
-          <div className="px-3 py-2 bg-white/[0.02] border-b border-white/[0.06] flex items-center justify-between text-[11px]">
-            <span className="font-mono text-text-dim flex items-center gap-1">
-              <Zap className="w-3 h-3 text-accent-yellow" />
-              TEST TRIGGER:
-            </span>
-            <div className="flex items-center gap-1.5">
-              <button
-                onClick={() => triggerDemoAlert('yellow')}
-                className="px-2 py-0.5 rounded bg-accent-yellow/15 text-accent-yellow hover:bg-accent-yellow/25 border border-accent-yellow/30 font-mono text-[10px] font-semibold transition-colors"
-              >
-                + Caution
-              </button>
-              <button
-                onClick={() => triggerDemoAlert('red')}
-                className="px-2 py-0.5 rounded bg-accent-red/15 text-accent-red hover:bg-accent-red/25 border border-accent-red/30 font-mono text-[10px] font-semibold transition-colors"
-              >
-                + Critical
-              </button>
             </div>
           </div>
 
