@@ -138,6 +138,17 @@ KINEMATIC_NOMINAL_FPS = float(os.getenv("KINEMATIC_NOMINAL_FPS", "20"))
 # Seconds between repeat alerts for the same track at the same tier
 ALERT_COOLDOWN_SECONDS = float(os.getenv("ALERT_COOLDOWN_SECONDS", "8"))
 
+# Phase 18 (alert discipline): a tier must be observed ALERT_CONFIRM_N times in
+# the last ALERT_CONFIRM_WINDOW scoring cycles before it can raise an alert, and
+# is only released once the whole window sits below it. This is what stops a
+# score oscillating around a threshold from buying a free siren on every swing.
+ALERT_CONFIRM_N = int(os.getenv("ALERT_CONFIRM_N", "2"))
+ALERT_CONFIRM_WINDOW = int(os.getenv("ALERT_CONFIRM_WINDOW", "3"))
+
+# Repeat alerts for a track parked at the same tier back off 8s -> 16s -> 32s,
+# stopping at this ceiling, so a sustained presence is reported and then quiet.
+ALERT_MAX_COOLDOWN_SECONDS = float(os.getenv("ALERT_MAX_COOLDOWN_SECONDS", "64"))
+
 # Cosine similarity (0-1) above which a face is treated as a watchlist match
 WATCHLIST_SIMILARITY_THRESHOLD = float(os.getenv("WATCHLIST_SIMILARITY_THRESHOLD", "0.5"))
 
@@ -145,6 +156,32 @@ WATCHLIST_SIMILARITY_THRESHOLD = float(os.getenv("WATCHLIST_SIMILARITY_THRESHOLD
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 
 # Syslog target for alert events (UDP; fire-and-forget, safe if unreachable)
+# Bearer token guarding the integration REST API (integration/api.py). Unset
+# means the API refuses every request rather than serving the incident feed
+# openly: this endpoint exposes person/vehicle sightings with timestamps, so
+# failing closed is the only safe default on an unset value.
+IBVAP_API_TOKEN = os.getenv("IBVAP_API_TOKEN", "").strip()
+
+# Browser origins allowed to call the /api/v1 dashboard routes. The React app
+# in frontend/ runs on Vite's :5173 while this API serves :8000, so the
+# defaults cover local development. An explicit allowlist, never "*" — these
+# routes carry a bearer token, and a wildcard would let any page the operator
+# has open read the incident feed. Set to the real dashboard origin on deploy.
+# Set to 1 to also accept dashboard origins from private LAN addresses, so a
+# phone or a second laptop on the same network can open the dashboard. Off by
+# default: it widens who may call the API from a browser. The bearer token is
+# still required either way, and this never permits public addresses.
+IBVAP_ALLOW_LAN = os.getenv("IBVAP_ALLOW_LAN", "0").strip() in ("1", "true", "yes")
+
+IBVAP_CORS_ORIGINS = [
+    o.strip()
+    for o in os.getenv(
+        "IBVAP_CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if o.strip()
+]
+
 SYSLOG_HOST = os.getenv("SYSLOG_HOST", "localhost")
 SYSLOG_PORT = int(os.getenv("SYSLOG_PORT", "514"))
 
