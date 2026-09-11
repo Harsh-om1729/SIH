@@ -5,6 +5,7 @@
 #   ./run.sh api      # FastAPI backend on :8000, serves /api/v1
 #   ./run.sh web      # React dashboard on :5173 (needs ./run.sh api too)
 #   ./run.sh up       # api + dashboard together, reachable on the LAN
+#   ./run.sh all      # AI pipeline + api + dashboard: the complete system
 #   ./run.sh camstop  # release the webcam the API is holding
 #   ./run.sh app 0 rtsp://...   # extra args pass through to app.py
 set -euo pipefail
@@ -35,6 +36,24 @@ case "${1:-app}" in
   web)            cd frontend
                   if [[ ! -d node_modules ]]; then npm install; fi
                   exec npm run dev -- --host ;;
+
+  # The whole system. The pipeline runs in the foreground (it owns the video
+  # window and the 'q'/'z' keys); api and dashboard run behind it and are
+  # killed when it exits. The dashboard shows the pipeline's own annotated
+  # frames, so the webcam is opened exactly once.
+  all)            shift || true
+                  lan=$(ipconfig getifaddr en0 2>/dev/null || echo 127.0.0.1)
+                  export IBVAP_ALLOW_LAN=1
+                  uvicorn integration.api:app --host 0.0.0.0 --port 8000 &
+                  api_pid=$!
+                  (cd frontend && { [[ -d node_modules ]] || npm install; } && npm run dev -- --host) &
+                  web_pid=$!
+                  trap 'kill $api_pid $web_pid 2>/dev/null' EXIT INT TERM
+                  echo
+                  echo "  Dashboard  http://$lan:5173   (this machine: http://localhost:5173)"
+                  echo "  Press q in the video window to stop everything."
+                  echo
+                  python app.py "$@" ;;
 
   # Both halves in one command. The API goes to the background and is killed
   # with this script, so Ctrl+C leaves nothing holding the webcam or :8000.

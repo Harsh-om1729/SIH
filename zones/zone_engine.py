@@ -55,11 +55,16 @@ class ZoneEngine:
         curfew_start_hour: int = 23,
         curfew_end_hour: int = 5,
         now_fn=datetime.now,
+        fixed_tier: "str | None" = None,
     ):
         self.config_path = config_path
         self.curfew_start_hour = curfew_start_hour
         self.curfew_end_hour = curfew_end_hour
         self._now_fn = now_fn
+        # A camera mounted at one point along the border sees one tier for
+        # its whole frame - set this to skip polygon classification entirely
+        # (see classify()) for a camera with no drawn zones.json at all.
+        self.fixed_tier = fixed_tier
         self.zones: list = []
         self.load()
 
@@ -92,6 +97,13 @@ class ZoneEngine:
 
     def classify(self, ground_point: tuple, direction: "tuple | None" = None) -> dict:
         """Returns {"tier": "red"|"yellow"|"green"|"none", "direction": "inward"|"outward"|None}"""
+        if self.fixed_tier is not None:
+            tier = self.fixed_tier
+            direction_label = self._direction_label_fixed(direction)
+            if tier == "green" and self._is_curfew():
+                tier = "yellow"
+            return {"tier": tier, "direction": direction_label}
+
         matches = [z for z in self.zones if z.contains(ground_point)]
         if not matches:
             return {"tier": "none", "direction": None}
@@ -163,6 +175,23 @@ class ZoneEngine:
         if abs(cosine) < 0.35:  # within ~20 degrees of parallel to the line
             return "parallel"
         return label_positive if cosine > 0 else label_negative
+
+    def _direction_label_fixed(self, direction) -> "str | None":
+        """Direction heuristic for a camera fixed to one zone tier: there is
+        no other zone's centroid to reference, so this reads raw on-screen
+        motion instead. A border camera faces across the line, so a ground
+        point descending in frame (larger y = closer to the lens) reads as
+        approaching the camera - "inward" - and rising reads as "outward",
+        the same vocabulary _direction_label produces from zone geometry."""
+        if direction is None:
+            return None
+        dx, dy = direction
+        magnitude = (dx ** 2 + dy ** 2) ** 0.5
+        if magnitude < self.MIN_DIRECTION_MAGNITUDE:
+            return None
+        if abs(dy) < abs(dx):
+            return "parallel"
+        return "inward" if dy > 0 else "outward"
 
     def _nearest_centroid(self, zone, zone_type: str) -> "tuple | None":
         candidates = [z for z in self.zones if z.zone_type == zone_type and z is not zone]

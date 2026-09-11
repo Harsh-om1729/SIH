@@ -210,7 +210,7 @@ class _LiveCamera:
 class LiveCameraRegistry:
     """Starts cameras on demand and releases them once nobody is watching."""
 
-    def __init__(self, sources_provider, width, height, tracker_factory=None):
+    def __init__(self, sources_provider, width, height, tracker_factory=None, yield_fn=None):
         # A callable, not a dict: cameras added from the dashboard are written
         # to config/cameras.json *after* this registry is constructed, and a
         # snapshot taken at import time would 404 every one of them until the
@@ -219,6 +219,11 @@ class LiveCameraRegistry:
         self._width = width
         self._height = height
         self._tracker_factory = tracker_factory
+        # yield_fn(name) -> True when the AI pipeline owns this camera. The
+        # direct preview then hands the device back: the pipeline cannot open
+        # a webcam this process is holding, and the pipeline is the one that
+        # scores threats and records incidents.
+        self._yield_fn = yield_fn
         self._cameras = {}
         self._lock = threading.Lock()
         self._reaper = threading.Thread(
@@ -282,12 +287,24 @@ class LiveCameraRegistry:
                 cam.stop()
 
     def _reap_idle(self):
-        while not self._reaper_stop.wait(5.0):
+        # 2s rather than 5s: this is also how quickly a direct preview gets out
+        # of the pipeline's way once the pipeline starts.
+        while not self._reaper_stop.wait(2.0):
             now = time.time()
             with self._lock:
                 for name, cam in list(self._cameras.items()):
+                    if not cam.running:
+                        continue
                     idle = cam.viewers == 0 and now - cam.last_viewer_at > IDLE_SHUTDOWN_SECONDS
-                    if cam.running and idle:
+                    try:
+                        yield_now = bool(self._yield_fn and self._yield_fn(name))
+                    except Exception:
+                        yield_now = False
+                    if yield_now:
+                        log.info("[%s] AI pipeline is running — releasing the direct preview", name)
+                        cam.viewers = 0
+                        cam.stop()
+                    elif idle:
                         log.info("[%s] no viewers for %.0fs — releasing camera",
                                  name, IDLE_SHUTDOWN_SECONDS)
                         cam.stop()

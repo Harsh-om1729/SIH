@@ -25,6 +25,7 @@ class Detection:
         "zone_direction",
         "watchlist_match",
         "watchlist_similarity",
+        "camera_name",
     )
 
     def __init__(self, class_id: int, class_name: str, confidence: float, box: tuple):
@@ -40,6 +41,10 @@ class Detection:
         self.zone_direction: str | None = None  # "inward" | "outward" | None (yellow only)
         self.watchlist_match: str | None = None  # matched name, if any
         self.watchlist_similarity: float = 0.0
+        # Which camera produced this detection. Set by app.py, which is the
+        # only place that knows; the incident store persists it so an alert
+        # can be traced back to a location. None outside the live pipeline.
+        self.camera_name: str | None = None
 
     def category(self) -> str:
         if self.class_id in PERSON_CLASS_IDS:

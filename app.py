@@ -47,6 +47,7 @@ from config.settings import (
     CAMERA_HEIGHT,
     CAMERA_SOURCES,
     CAMERA_WIDTH,
+    CAMERA_ZONE_TIERS,
     _parse_camera_sources,
     CURFEW_END_HOUR,
     CURFEW_START_HOUR,
@@ -71,6 +72,7 @@ from face.face_recognizer import FaceRecognizer
 from face.watchlist import WatchlistDB, WatchlistMatcher
 from filtering.false_alarm import FalseAlarmFilter
 from integration.syslog_notifier import SyslogNotifier
+from integration.runtime_state import PipelinePublisher
 from integration.webhook import WebhookNotifier
 from intelligence.loiter import LoiterTracker
 from intelligence.threat_rules import ThreatRulesDB
@@ -227,6 +229,7 @@ def main() -> None:
             config_path=f"config/zones_{name}.json",
             curfew_start_hour=CURFEW_START_HOUR,
             curfew_end_hour=CURFEW_END_HOUR,
+            fixed_tier=CAMERA_ZONE_TIERS.get(name),
         )
         for name in CAMERA_SOURCES
     }
@@ -238,9 +241,16 @@ def main() -> None:
     # Without zones there is no border line, so sector/direction/loiter/group
     # all read zero and the score collapses to time + class + movement. That
     # silently turns a border system into a generic motion alarm, so say it
-    # loudly rather than letting a sentry trust an un-configured camera.
+    # loudly rather than letting a sentry trust an un-configured camera. A
+    # camera named in CAMERA_ZONE_TIERS needs no drawn polygons at all - its
+    # whole frame is one tier - so it's exempt from the warning.
     for name in CAMERA_SOURCES:
-        if not zone_engines[name].zones:
+        if zone_engines[name].fixed_tier is not None:
+            log.info(
+                "[%s] fixed to %s zone tier via CAMERA_ZONE_TIERS — no polygons needed",
+                name, zone_engines[name].fixed_tier.upper(),
+            )
+        elif not zone_engines[name].zones:
             log.warning(
                 "[%s] NO ZONES DEFINED (%s is empty) — border scoring is inactive: "
                 "no sector, crossing-direction, loitering or group risk will be "
@@ -290,6 +300,25 @@ def main() -> None:
     isolator = CameraErrorIsolator()
     last_health: dict[str, str] = {}
 
+    # Live frames and health for the dashboard (integration/runtime_state.py).
+    # The dashboard reads these instead of opening the camera itself, so the
+    # operator sees exactly what the model sees while it keeps alerting.
+    publisher = PipelinePublisher()
+    camera_state = {name: {} for name in CAMERA_SOURCES}
+    last_health_publish = 0.0
+    # Zones saved from the dashboard land in config/zones_<cam>.json. Watching
+    # the mtime lets a running pipeline pick them up without a restart.
+    zone_mtimes = {
+        name: (os.path.getmtime(zone_engines[name].config_path)
+               if os.path.exists(zone_engines[name].config_path) else None)
+        for name in CAMERA_SOURCES
+    }
+    models_info = {
+        "detector": DETECTION_MODEL_PATH,
+        "reid": REID_MODEL_PATH,
+        "face": "insightface/buffalo_s",
+    }
+
     def process_camera_frame(name: str, frame) -> None:
         """The full per-camera pipeline for one frame.
 
@@ -304,6 +333,8 @@ def main() -> None:
         with profiler.stage("activity_gate"):
             active, motion_score = gates[name].is_active(frame)
         frame_counters[name] += 1
+        camera_state[name]["active"] = bool(active)
+        camera_state[name]["motion"] = round(float(motion_score), 2)
 
         # High activity: run the full pipeline every frame.
         # Idle: hold a floor of IDLE_MIN_FPS full passes per second, so
@@ -368,6 +399,7 @@ def main() -> None:
                 det.watchlist_match = cached_match
                 det.watchlist_similarity = cached_similarity
 
+            det.camera_name = name
             x1, y1, x2, y2 = det.box
             ground_point = ((x1 + x2) // 2, y2)
             with profiler.stage("zone_classify"):
@@ -399,6 +431,21 @@ def main() -> None:
             draw_fps_overlay(processed, fps_ema[name])
             zone_drawers[name].draw_overlay(processed)
 
+        with profiler.stage("publish_live"):
+            publisher.publish_frame(name, processed)
+        tiers = [s.tier for s in scores]
+        camera_state[name].update(
+            lastFrameAt=time.time(),
+            fps=round(fps_ema[name], 1),
+            detections=len(detections),
+            persons=sum(1 for d in detections if d.category() == "person"),
+            vehicles=sum(1 for d in detections if d.category() == "vehicle"),
+            maxTier=("red" if "red" in tiers else "yellow" if "yellow" in tiers
+                     else "green" if tiers else None),
+            lowLightBoost=bool(preprocessor.last_boost_applied),
+            brightness=round(float(preprocessor.last_brightness), 1),
+        )
+
         with profiler.stage("frame_buffer_copy"):
             frame_buffers[name].append(processed.copy())
         with profiler.stage("alert_handle"):
@@ -420,6 +467,36 @@ def main() -> None:
                     log.info("Camera health changed — all cameras ONLINE")
                 last_health = health
 
+            now_wall = time.time()
+            if now_wall - last_health_publish >= 1.0:
+                last_health_publish = now_wall
+                for name in CAMERA_SOURCES:
+                    path = zone_engines[name].config_path
+                    mtime = os.path.getmtime(path) if os.path.exists(path) else None
+                    if mtime != zone_mtimes[name]:
+                        zone_mtimes[name] = mtime
+                        try:
+                            zone_engines[name].load()
+                            log.info("[%s] zones reloaded from %s (%d zone(s))",
+                                     name, path, len(zone_engines[name].zones))
+                        except (OSError, ValueError, KeyError) as exc:
+                            # A half-written or hand-edited file: keep the
+                            # zones already loaded rather than dropping to none.
+                            log.warning("[%s] could not reload zones from %s: %s",
+                                        name, path, exc)
+                publisher.publish_health({
+                    "cameras": {
+                        name: {
+                            "health": health.get(name),
+                            "zones": len(zone_engines[name].zones),
+                            **camera_state[name],
+                        }
+                        for name in CAMERA_SOURCES
+                    },
+                    "models": models_info,
+                    "alertDispatchQueue": ALERT_DISPATCH_QUEUE_SIZE,
+                })
+
             frames = manager.read_all()
             for name, frame in frames.items():
                 if frame is None:
@@ -440,6 +517,7 @@ def main() -> None:
         report = profiler.report()
         if report:
             print(report)
+        publisher.close()
         manager.stop_all()
         # Drain queued webhook/evidence work before closing the stores it uses.
         alert_dispatcher.stop()

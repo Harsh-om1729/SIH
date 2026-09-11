@@ -13,6 +13,31 @@ cp .env.example .env
 python app.py
 ```
 
+### Model weights — not in git
+
+`models/*.pt`, `*.onnx` and `*.onnx.data` are gitignored (100+ MB of binaries
+don't belong in the repo). A fresh `git clone`/`git pull` gets **no model
+files at all** — `python app.py` fails immediately with
+`FileNotFoundError: 'models/yolov8n.onnx' does not exist` (or `yolov8s.onnx`,
+depending what `DETECTION_MODEL_PATH` in your `.env` says). Before running
+anything:
+
+1. **Get `models/` from a teammate** (zip it, ~130 MB) and drop it in at the
+   repo root — this is the only way to get `osnet_x0_25_msmt17.onnx`, which
+   has no public download; whoever converted it is the only source.
+2. Alternatively, regenerate the YOLO detector yourself (needs internet):
+   `yolo export model=yolov8n.pt format=onnx` (or `yolov8s.pt`) auto-downloads
+   the base weights and exports an ONNX file — move it into `models/` as
+   whichever name `DETECTION_MODEL_PATH` expects.
+3. `InsightFace buffalo_s` (face recognition) needs no manual step — it
+   downloads itself into `~/.insightface/models/buffalo_s/` the first time
+   `app.py` runs, provided you have internet at least once.
+
+`config/zones_*.json` is also gitignored (each camera's drawn zones are local
+config, not code) — a fresh clone starts with no zones and Phase 18's no-zone
+ceiling applies (see the Phase 18 section below) until you press `z` in the
+video window to draw them.
+
 ## Phase status
 
 - [x] Phase 0 — Foundation
@@ -98,6 +123,29 @@ Red is currently reachable only via the crossing override, which needs >=4px
 of movement, so a stationary or distant subject never escalates. The assertion
 is right and the scoring is wrong - Phase 19 adds a sustained-presence
 override, after which the decorator comes off.
+
+### Per-camera fixed zone tiers (alternative to drawn polygons)
+
+Drawing red/yellow/green polygons per camera (Phase 8) assumes one camera's
+frame can contain multiple tiers - true for a wide-FOV camera watching a whole
+approach, but not how every border camera is actually mounted: a camera bolted
+right at the fence line sees nothing *but* the border, for its entire frame,
+always. For that camera, drawing a polygon around "the whole picture" is
+busywork, and it is also the more fragile part of a live demo (skip the 'z'
+key, or draw a bad polygon, and scoring silently degrades to the no-zone
+ceiling).
+
+`CAMERA_ZONE_TIERS` (`.env`) fixes a named camera to one tier - e.g.
+`CAMERA_ZONE_TIERS=cam0=red,cam1=yellow,cam2=green` - and `ZoneEngine`
+(`zones/zone_engine.py`) skips polygon classification for it entirely: every
+detection from that camera inherits the assigned tier, no `config/zones_
+<camera>.json` required. Direction ("inward"/"outward") is read from raw
+on-screen motion instead of a vector toward another zone's centroid - a
+ground point descending in frame reads as approaching the camera - since
+there is no other zone left to reference once the camera has only one.
+A camera not listed keeps using its drawn polygons exactly as before; the two
+modes coexist per camera. 9 unit tests in `tests/test_zone_engine.py`
+(`TestFixedTierZoneEngine`).
 
 
 ## Phase 5 benchmark notes (measured on Apple M4, run via `scripts/benchmark_models.py`)

@@ -51,6 +51,36 @@ CAMERA_SOURCES: dict[str, int | str] = _parse_camera_sources(
     os.getenv("CAMERA_SOURCES", "cam0=0")
 )
 
+# Comma-separated name=tier pairs, e.g. "cam0=red,cam1=yellow,cam2=green".
+# A camera physically mounted at one point along the border sees one tier for
+# its whole frame - there is no sub-region to draw. Naming it here skips
+# ZoneEngine's polygon classification entirely for that camera (see
+# ZoneEngine.__init__'s fixed_tier argument): every detection from it just
+# inherits the assigned tier, and direction is read from raw on-screen motion
+# instead of a vector toward another zone's centroid. A camera not listed
+# here is unaffected and keeps using its drawn config/zones_<camera>.json.
+def _parse_camera_zone_tiers(raw: str) -> dict[str, str]:
+    tiers: dict[str, str] = {}
+    for pair in raw.split(","):
+        name, _, value = pair.partition("=")
+        name = name.strip()
+        value = value.strip().lower()
+        if not name or not value:
+            continue
+        if value not in ("red", "yellow", "green"):
+            logging.getLogger("ibvap").warning(
+                "CAMERA_ZONE_TIERS: ignoring %s=%s - tier must be red, yellow or green",
+                name, value,
+            )
+            continue
+        tiers[name] = value
+    return tiers
+
+
+CAMERA_ZONE_TIERS: dict[str, str] = _parse_camera_zone_tiers(
+    os.getenv("CAMERA_ZONE_TIERS", "")
+)
+
 # 0-255 scale; frames measured below this trigger a CLAHE + gamma low-light boost
 BRIGHTNESS_THRESHOLD = float(os.getenv("BRIGHTNESS_THRESHOLD", "90"))
 
@@ -151,8 +181,12 @@ ALERT_CONFIRM_WINDOW = int(os.getenv("ALERT_CONFIRM_WINDOW", "3"))
 # stopping at this ceiling, so a sustained presence is reported and then quiet.
 ALERT_MAX_COOLDOWN_SECONDS = float(os.getenv("ALERT_MAX_COOLDOWN_SECONDS", "64"))
 
-# Cosine similarity (0-1) above which a face is treated as a watchlist match
-WATCHLIST_SIMILARITY_THRESHOLD = float(os.getenv("WATCHLIST_SIMILARITY_THRESHOLD", "0.5"))
+# Cosine similarity (0-1) above which a face is treated as a watchlist match.
+# 0.5 was matching almost any face against a stored embedding (observed hits
+# as low as 0.51-0.55 against an unrelated person) - raised to cut false
+# positives while still catching a genuine match, which typically scores well
+# above 0.7 with InsightFace embeddings.
+WATCHLIST_SIMILARITY_THRESHOLD = float(os.getenv("WATCHLIST_SIMILARITY_THRESHOLD", "0.7"))
 
 # Outbound webhook URL for alert events (empty = disabled)
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")

@@ -36,6 +36,8 @@ import hmac
 import json
 import logging
 import os
+import shutil
+import sqlite3
 import threading
 import time
 
@@ -45,13 +47,14 @@ from fastapi import (
     Depends,
     FastAPI,
     HTTPException,
+    Query,
     Request,
     WebSocket,
     WebSocketDisconnect,
     status,
 )
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from config.settings import (
@@ -69,6 +72,7 @@ from config.settings import (
     IBVAP_CORS_ORIGINS,
     IDLE_MIN_FPS,
     MOTION_THRESHOLD,
+    REID_MODEL_PATH,
     REID_SIMILARITY_THRESHOLD,
     SYSLOG_HOST,
     SYSLOG_PORT,
@@ -77,12 +81,14 @@ from config.settings import (
     configure_logging,
 )
 import cv2
+from cryptography.fernet import InvalidToken
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from config.settings import API_TOKEN
-from database.incident_store import IncidentStore
+from database.incident_store import RESOLUTION_REASONS, IncidentStore
+from integration import runtime_state
 from integration.live_stream import CameraBusyError, LiveCameraRegistry
 from intelligence.threat_score import GREEN_MAX, YELLOW_MAX
 
@@ -209,6 +215,34 @@ _UNRECORDED_BREAKDOWN = {
 }
 
 
+def _breakdown(row: dict) -> dict:
+    """Threat-score components for one incident.
+
+    Incidents recorded before the breakdown column existed have none; they
+    return zeros with recorded=False so the dashboard can say "not recorded"
+    instead of presenting 0/0/0/0 as if the model had computed it.
+    """
+    try:
+        raw = json.loads(row.get("breakdown") or "null")
+    except (TypeError, ValueError):
+        raw = None
+    if not isinstance(raw, dict) or not raw:
+        return {**_UNRECORDED_BREAKDOWN, "recorded": False}
+    return {
+        "sectorRisk": raw.get("sector_risk", 0),
+        "timeRisk": raw.get("time_risk", 0),
+        "kinematicsRisk": raw.get("kinematics_risk", 0),
+        "classConfidence": raw.get("class_confidence", 0),
+        "directionRisk": raw.get("direction_risk", 0),
+        "loiterRisk": raw.get("loiter_risk", 0),
+        "groupRisk": raw.get("group_risk", 0),
+        "overrideReason": raw.get("override_reason"),
+        "tierCeiling": raw.get("tier_ceiling"),
+        "ceilingReason": raw.get("ceiling_reason"),
+        "recorded": True,
+    }
+
+
 def _serialise(row: dict) -> dict:
     """One incidents row -> the camelCase Incident the dashboard expects.
 
@@ -231,13 +265,20 @@ def _serialise(row: dict) -> dict:
         "score": row.get("score") or 0,
         "tier": row.get("tier") or "green",
         "timestamp": row.get("timestamp") or 0,
-        # Not recorded per-incident yet — the table predates multi-camera.
+        # NULL on incidents recorded before the pipeline stored it.
         "cameraName": row.get("camera_name") or "unknown",
-        "snapshotUrl": row.get("snapshot_path"),
-        "cropUrl": row.get("crop_path"),
-        "burstUrls": burst if isinstance(burst, list) else [],
+        # API paths, not file paths. Evidence is Fernet-encrypted on disk, so
+        # the stored path was never loadable by a browser; these routes
+        # decrypt it (see v1_evidence). The dashboard appends the base URL
+        # and token.
+        "snapshotUrl": f"/incidents/{row['id']}/evidence/snapshot" if row.get("snapshot_path") else None,
+        "cropUrl": f"/incidents/{row['id']}/evidence/crop" if row.get("crop_path") else None,
+        "burstUrls": (
+            [f"/incidents/{row['id']}/evidence/burst/{i}" for i in range(len(burst))]
+            if isinstance(burst, list) else []
+        ),
         "watchlistMatch": row.get("watchlist_match"),
-        "breakdown": _UNRECORDED_BREAKDOWN,
+        "breakdown": _breakdown(row),
         "reidGalleryId": f"PG-{person_id}" if person_id is not None else "",
         "encryption": {
             "cipher": "FERNET-AES128-CBC",
@@ -252,6 +293,9 @@ def _serialise(row: dict) -> dict:
         "status": row.get("status"),
         "acknowledgedBy": row.get("acknowledged_by"),
         "acknowledgedAt": row.get("acknowledged_at"),
+        "resolvedBy": row.get("resolved_by"),
+        "resolvedAt": row.get("resolved_at"),
+        "resolutionReason": row.get("resolution_reason"),
     }
 
 
@@ -266,7 +310,9 @@ def health() -> dict:
 
 
 @v1.get("/incidents")
-def v1_incidents(limit: int = 50, _: None = Depends(require_token)) -> list:
+def v1_incidents(
+    limit: int = Query(200, ge=1, le=1000), _: None = Depends(require_token)
+) -> list:
     """Returns a bare JSON array — incidentsApi.getIncidents() types the
     response as Incident[], not an envelope, so a {count, incidents} wrapper
     would land in the UI as zero incidents rather than as an error."""
@@ -353,8 +399,24 @@ def _tracker_factory():
     return Tracker(model_path=DETECTION_MODEL_PATH, confidence=DETECTION_CONFIDENCE)
 
 
+def _pipeline_state() -> "dict | None":
+    """The running pipeline's last published health, or None if it is not
+    running. See integration/runtime_state.py."""
+    health = runtime_state.read_health()
+    return health if health and health.get("running") else None
+
+
+def _pipeline_owns(camera_id: str) -> bool:
+    state = _pipeline_state()
+    return bool(state and camera_id in (state.get("cameras") or {}))
+
+
 registry = LiveCameraRegistry(
-    _camera_sources, CAMERA_WIDTH, CAMERA_HEIGHT, tracker_factory=_tracker_factory
+    _camera_sources,
+    CAMERA_WIDTH,
+    CAMERA_HEIGHT,
+    tracker_factory=_tracker_factory,
+    yield_fn=_pipeline_owns,
 )
 
 
@@ -384,26 +446,82 @@ def require_token_query(request: Request) -> None:
         raise HTTPException(status_code=401, detail="Invalid or missing token.")
 
 
+def _zone_count(camera_id: str) -> int:
+    try:
+        with open(_zones_path(camera_id)) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return 0
+    return len(data) if isinstance(data, list) else 0
+
+
+def _camera_status(camera_id: str, pipeline: "dict | None") -> dict:
+    """Where this camera's picture comes from, and whether it is healthy.
+
+    source = "pipeline"  the AI pipeline owns the device; boxes, zones and
+                         threat scores on the feed are the model's real
+                         output, and incidents are being recorded.
+             "direct"    the dashboard opened the camera itself for a preview.
+                         Detection boxes are drawn, but nothing is scored or
+                         recorded — no alerts will fire from this view.
+             "idle"      nobody has the camera open.
+    """
+    cams = (pipeline or {}).get("cameras") or {}
+    if camera_id in cams:
+        st = cams[camera_id]
+        return {
+            "source": "pipeline",
+            "health": st.get("health") or "offline",
+            "fps": st.get("fps") or 0.0,
+            "activityGate": "HIGH" if st.get("active") else "LOW",
+            "lowLightBoost": bool(st.get("lowLightBoost")),
+            "brightness": st.get("brightness"),
+            "detections": st.get("detections", 0),
+            "maxTier": st.get("maxTier"),
+            "lastFrameAt": st.get("lastFrameAt"),
+            "zones": st.get("zones", _zone_count(camera_id)),
+        }
+    live = registry.status(camera_id)
+    return {
+        "source": "direct" if live["live"] else "idle",
+        "health": "online" if live["live"] else "idle",
+        "fps": live["fps"],
+        "activityGate": None,
+        "lowLightBoost": None,
+        "brightness": None,
+        "detections": None,
+        "maxTier": None,
+        "lastFrameAt": None,
+        "zones": _zone_count(camera_id),
+    }
+
+
 @v1.get("/cameras")
 def v1_cameras(_: None = Depends(require_token)) -> list:
     overlay = _load_camera_overlay()
+    pipeline = _pipeline_state()
     out = []
     for cam_id, source in _camera_sources().items():
         meta = overlay.get(cam_id, {})
-        live = registry.status(cam_id)
+        status_ = _camera_status(cam_id, pipeline)
         out.append(
             {
                 "id": cam_id,
                 "name": cam_id,
-                "location": meta.get("location", f"{cam_id} ({source})"),
-                "sector": meta.get("sector", "Unassigned Sector"),
-                # Relative so the dashboard works over LAN too; Vite proxies
-                # nothing, so this is resolved against VITE_API_BASE_URL.
+                "location": meta.get("location") or f"{cam_id} (source {source})",
+                "sector": meta.get("sector") or "Unassigned sector",
+                # Relative so the dashboard works over LAN too; resolved
+                # against VITE_API_BASE_URL on the client.
                 "streamUrl": f"/cameras/{cam_id}/stream",
-                "fps": str(live["fps"]),
-                "activity": "LIVE" if live["live"] else "STANDBY",
-                "isActive": True,
+                "fps": str(status_["fps"]),
+                "activity": (
+                    ("MOTION" if status_["activityGate"] == "HIGH" else "IDLE")
+                    if status_["source"] == "pipeline"
+                    else ("PREVIEW" if status_["source"] == "direct" else "STANDBY")
+                ),
+                "isActive": status_["health"] in ("online", "idle"),
                 "resolution": f"{CAMERA_WIDTH}x{CAMERA_HEIGHT}",
+                **status_,
             }
         )
     return out
@@ -470,9 +588,63 @@ def v1_camera_stop(camera_id: str, _: None = Depends(require_token)) -> dict:
     return {"success": True, "id": camera_id, "wasLive": was["live"]}
 
 
+def _mjpeg_part(jpeg: bytes) -> bytes:
+    return (
+        b"--frame\r\nContent-Type: image/jpeg\r\n"
+        b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n" + jpeg + b"\r\n"
+    )
+
+
+def _pipeline_frames(camera_id: str):
+    """Serves the frames app.py publishes, re-reading only when the file
+    changes. Ends after 5s with no new frame so the <img> reconnects and the
+    route re-decides the source — e.g. the pipeline stopped, so fall back to
+    a direct preview, rather than freezing on the last frame forever."""
+    path = runtime_state.frame_path(camera_id)
+    poll = 0.5 / max(runtime_state.LIVE_PUBLISH_FPS, 1.0)
+    last_mtime = None
+    last_new = time.monotonic()
+    while True:
+        try:
+            mtime = os.stat(path).st_mtime_ns
+        except OSError:
+            mtime = None
+        if mtime is not None and mtime != last_mtime:
+            try:
+                with open(path, "rb") as f:
+                    jpeg = f.read()
+            except OSError:
+                jpeg = b""
+            if jpeg:
+                last_mtime = mtime
+                last_new = time.monotonic()
+                yield _mjpeg_part(jpeg)
+                continue
+        if time.monotonic() - last_new > 5.0:
+            return
+        time.sleep(poll)
+
+
 @v1.get("/cameras/{camera_id}/stream")
 def v1_camera_stream(camera_id: str, _: None = Depends(require_token_query)):
-    """multipart/x-mixed-replace — the format an <img> tag renders as video."""
+    """multipart/x-mixed-replace — the format an <img> tag renders as video.
+
+    Prefers the AI pipeline's own annotated frames when it is running, so the
+    dashboard never competes with it for the device. Only when the pipeline
+    is down does this open the camera itself as a direct preview.
+    """
+    if camera_id not in _camera_sources():
+        raise HTTPException(status_code=404, detail=f"No camera {camera_id!r}.")
+    if _pipeline_owns(camera_id):
+        try:
+            runtime_state.frame_path(camera_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        return StreamingResponse(
+            _pipeline_frames(camera_id),
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={"X-IBVAP-Source": "pipeline", "Cache-Control": "no-store"},
+        )
     try:
         cam = registry.acquire(camera_id)
     except KeyError:
@@ -847,6 +1019,350 @@ def v1_put_integrations(body: dict = Body(...), _: None = Depends(require_token)
     saved["integrations"] = {**saved.get("integrations", {}), **body}
     _save_settings_overrides(saved)
     return _effective_settings()["integrations"]
+
+
+
+# --------------------------------------------------------------------------
+# Incident actions, evidence, system health
+# --------------------------------------------------------------------------
+
+
+@v1.get("/meta")
+def v1_meta(_: None = Depends(require_token)) -> dict:
+    """Vocabularies the dashboard must not hardcode, because the backend
+    validates against them."""
+    return {
+        "resolutionReasons": RESOLUTION_REASONS,
+        "tierThresholds": {"yellow": GREEN_MAX + 1, "red": YELLOW_MAX + 1},
+        "cameraResolution": f"{CAMERA_WIDTH}x{CAMERA_HEIGHT}",
+        "livePublishFps": runtime_state.LIVE_PUBLISH_FPS,
+    }
+
+
+@v1.post("/incidents/{incident_id}/resolve")
+def v1_resolve(
+    incident_id: int, body: dict = Body(...), _: None = Depends(require_token)
+) -> dict:
+    """Close an incident with a reason from RESOLUTION_REASONS. The reason is
+    what turns operator workflow into a false-alarm dataset (cattle,
+    vegetation...), so free text is refused rather than stored."""
+    reason = str(body.get("reason", "")).strip()
+    if reason not in RESOLUTION_REASONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"reason must be one of {RESOLUTION_REASONS}",
+        )
+    store = IncidentStore()
+    try:
+        if store.get_incident(incident_id) is None:
+            raise HTTPException(status_code=404, detail=f"No incident {incident_id}.")
+        # Shared service token, no per-user identity to attribute this to.
+        store.resolve(incident_id, operator="dashboard", reason=reason)
+        row = store.get_incident(incident_id)
+    finally:
+        store.close()
+    return _serialise(row)
+
+
+@v1.get("/incidents/{incident_id}/evidence/{kind}")
+@v1.get("/incidents/{incident_id}/evidence/{kind}/{index}")
+def v1_evidence(
+    incident_id: int,
+    kind: str,
+    index: int = 0,
+    _: None = Depends(require_token_query),
+):
+    """Decrypts one evidence image and returns it as JPEG.
+
+    Only paths recorded in the incident row are served, and only if they
+    resolve inside the evidence directory — the id and index come from the
+    URL, so nothing here may be allowed to walk to an arbitrary file.
+    Token in the query string for the same reason as the MJPEG stream: an
+    <img> tag cannot send an Authorization header.
+    """
+    if kind not in ("snapshot", "crop", "burst"):
+        raise HTTPException(status_code=404, detail=f"Unknown evidence kind {kind!r}.")
+    store = IncidentStore()
+    try:
+        row = store.get_incident(incident_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"No incident {incident_id}.")
+        if kind == "snapshot":
+            path = row.get("snapshot_path")
+        elif kind == "crop":
+            path = row.get("crop_path")
+        else:
+            try:
+                bursts = json.loads(row.get("burst_paths") or "[]")
+            except (TypeError, ValueError):
+                bursts = []
+            path = bursts[index] if isinstance(bursts, list) and 0 <= index < len(bursts) else None
+        if not path:
+            raise HTTPException(status_code=404, detail=f"No {kind} evidence was recorded for this incident.")
+        root = os.path.realpath(store.evidence_dir)
+        real = os.path.realpath(path)
+        if not real.startswith(root + os.sep):
+            raise HTTPException(status_code=404, detail="Evidence path is outside the evidence store.")
+        try:
+            data = store.decrypt_image_bytes(real)
+        except FileNotFoundError:
+            raise HTTPException(status_code=410, detail="Evidence file is no longer on disk.")
+        except InvalidToken:
+            raise HTTPException(
+                status_code=409,
+                detail="Evidence cannot be decrypted with the current database/evidence.key.",
+            )
+    finally:
+        store.close()
+    # private: it is surveillance evidence; cacheable because it never changes.
+    return Response(content=data, media_type="image/jpeg",
+                    headers={"Cache-Control": "private, max-age=3600"})
+
+
+_API_STARTED_AT = time.time()
+
+try:
+    import psutil
+
+    psutil.cpu_percent(interval=None)  # prime it: the first sample is always 0.0
+except ImportError:  # pragma: no cover - psutil ships with ultralytics
+    psutil = None
+
+
+def _file_info(path: str) -> dict:
+    """Presence and size of a model file — or a model directory (InsightFace
+    ships a folder of ONNX files), whose size is the sum of its files rather
+    than the few bytes of the directory entry itself."""
+    if os.path.isdir(path):
+        total = 0
+        for root, _dirs, files in os.walk(path):
+            for name in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, name))
+                except OSError:
+                    pass
+        return {"path": path, "present": total > 0, "sizeMb": round(total / 1e6, 1)}
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return {"path": path, "present": False, "sizeMb": None}
+    return {"path": path, "present": True, "sizeMb": round(size / 1e6, 1)}
+
+
+def _incident_stats() -> dict:
+    try:
+        store = IncidentStore()
+        try:
+            total, open_, acked, resolved, open_red, last = store._conn.execute(
+                "SELECT COUNT(*),"
+                " SUM(CASE WHEN status = 'open' THEN 1 ELSE 0 END),"
+                " SUM(CASE WHEN status = 'acknowledged' THEN 1 ELSE 0 END),"
+                " SUM(CASE WHEN status = 'resolved' THEN 1 ELSE 0 END),"
+                " SUM(CASE WHEN status = 'open' AND tier = 'red' THEN 1 ELSE 0 END),"
+                " MAX(timestamp) FROM incidents"
+            ).fetchone()
+        finally:
+            store.close()
+    except sqlite3.Error as exc:
+        return {"ok": False, "error": str(exc)}
+    return {
+        "ok": True,
+        "total": total or 0,
+        "open": open_ or 0,
+        "acknowledged": acked or 0,
+        "resolved": resolved or 0,
+        "openRed": open_red or 0,
+        "lastIncidentAt": last,
+    }
+
+
+def _watchlist_count() -> "int | None":
+    # Read-only and bypassing WatchlistDB on purpose: constructing it creates
+    # an encryption key on a fresh install, and a health check must not have
+    # side effects.
+    path = "database/watchlist.db"
+    if not os.path.exists(path):
+        return 0
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        try:
+            return conn.execute("SELECT COUNT(*) FROM watchlist").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+
+
+def _evidence_stats(evidence_dir: str = "snapshots") -> dict:
+    files = 0
+    size = 0
+    try:
+        with os.scandir(evidence_dir) as it:
+            for entry in it:
+                if entry.is_file():
+                    files += 1
+                    size += entry.stat().st_size
+    except OSError:
+        pass
+    return {"dir": evidence_dir, "files": files, "sizeMb": round(size / 1e6, 1)}
+
+
+@v1.get("/system/health")
+def v1_system_health(_: None = Depends(require_token)) -> dict:
+    """Everything an operator needs to know is working, measured rather than
+    assumed. Replaces the dashboard's hardcoded telemetry (a fixed 42% GPU on
+    a Jetson this system does not run on) and the old /status, which only
+    ever proved the API process was alive."""
+    pipeline = runtime_state.read_health()
+    running = bool(pipeline and pipeline.get("running"))
+    cams = (pipeline or {}).get("cameras") or {}
+
+    if not running:
+        overall = "pipeline-stopped"
+    elif any((c or {}).get("health") != "online" for c in cams.values()):
+        overall = "degraded"
+    else:
+        overall = "ok"
+
+    pipeline_out = {
+        "running": running,
+        "detail": (
+            None if running else
+            "The AI pipeline is not running, so no detections are being scored and "
+            "no incidents recorded. Start it with ./run.sh."
+        ),
+    }
+    if pipeline:
+        pipeline_out.update({
+            "pid": pipeline.get("pid"),
+            "startedAt": pipeline.get("startedAt"),
+            "updatedAt": pipeline.get("updatedAt"),
+            "ageSeconds": pipeline.get("ageSeconds"),
+            "cameras": cams if running else {},
+            "models": pipeline.get("models"),
+        })
+        if running and psutil is not None:
+            try:
+                pipeline_out["rssMb"] = round(psutil.Process(pipeline["pid"]).memory_info().rss / 1e6)
+            except (psutil.Error, KeyError, TypeError):
+                pass
+
+    host = None
+    if psutil is not None:
+        vm = psutil.virtual_memory()
+        host = {
+            "cpuPercent": psutil.cpu_percent(interval=None),
+            "cpuCount": psutil.cpu_count(),
+            "memoryPercent": vm.percent,
+            "memoryUsedGb": round((vm.total - vm.available) / 1e9, 1),
+            "memoryTotalGb": round(vm.total / 1e9, 1),
+            "apiRssMb": round(psutil.Process().memory_info().rss / 1e6),
+            # GPU utilisation is not reported: nothing in this stack exposes
+            # it portably, and a made-up number is worse than none.
+            "gpuPercent": None,
+        }
+    disk = shutil.disk_usage(".")
+    hub = globals().get("_hub")
+    return {
+        "status": overall,
+        "checkedAt": time.time(),
+        "api": {
+            "status": "ok",
+            "startedAt": _API_STARTED_AT,
+            "uptimeSeconds": round(time.time() - _API_STARTED_AT),
+            "websocketClients": len(hub._clients) if hub is not None else 0,
+        },
+        "pipeline": pipeline_out,
+        "database": _incident_stats(),
+        "evidence": _evidence_stats(),
+        "disk": {
+            "freeGb": round(disk.free / 1e9, 1),
+            "totalGb": round(disk.total / 1e9, 1),
+            "percentUsed": round(100 * (disk.total - disk.free) / disk.total, 1),
+        },
+        "host": host,
+        "models": {
+            "detector": _file_info(DETECTION_MODEL_PATH),
+            "reid": _file_info(REID_MODEL_PATH),
+            "face": _file_info(os.path.expanduser("~/.insightface/models/buffalo_s")),
+        },
+        "zones": {cam_id: _zone_count(cam_id) for cam_id in _camera_sources()},
+        "watchlist": {"enrolled": _watchlist_count()},
+    }
+
+
+@v1.post("/integrations/test")
+def v1_integrations_test(_: None = Depends(require_token)) -> dict:
+    """Actually exercises the configured outputs, replacing a button that
+    always reported "HTTP 200 OK · 24.2 ms" without sending anything.
+
+    Tests the values the dashboard shows (.env plus dashboard overrides). The
+    running pipeline read .env at startup, so an override saved here reaches
+    the pipeline only after a restart — the response says which values were
+    tested.
+    """
+    import logging.handlers
+
+    import requests
+
+    from integration.syslog_notifier import _build_handler
+
+    eff = _effective_settings()["integrations"]
+    results: dict = {}
+
+    url = (eff.get("capWebhookUrl") or "").strip()
+    if not url:
+        results["webhook"] = {"ok": False, "detail": "No webhook URL is configured."}
+    else:
+        started = time.perf_counter()
+        try:
+            resp = requests.post(
+                url,
+                json={"type": "ibvap.diagnostic", "sentAt": time.time()},
+                timeout=3,
+            )
+            results["webhook"] = {
+                "ok": resp.ok,
+                "status": resp.status_code,
+                "latencyMs": round((time.perf_counter() - started) * 1000, 1),
+                "url": url,
+            }
+        except requests.RequestException as exc:
+            results["webhook"] = {
+                "ok": False,
+                "detail": f"{type(exc).__name__}: {exc}"[:240],
+                "url": url,
+            }
+
+    host = (eff.get("siemHost") or "").strip()
+    if not eff.get("siemEnabled") or not host:
+        results["syslog"] = {"ok": False, "detail": "Syslog output is not configured."}
+    else:
+        # A throwaway handler, not SyslogNotifier: its constructor attaches a
+        # handler to a module-level logger, so one per click would leak
+        # handlers and duplicate every later alert.
+        handler = None
+        try:
+            handler = _build_handler(host, int(eff.get("siemPort") or 514))
+            if handler is None:
+                raise OSError("syslog handler could not be created")
+            handler.emit(logging.makeLogRecord({
+                "msg": "IBVAP diagnostic test message", "levelno": logging.INFO,
+                "levelname": "INFO", "name": "ibvap.diagnostic",
+            }))
+            results["syslog"] = {
+                "ok": True,
+                "detail": (
+                    f"Sent to {host}:{eff.get('siemPort')} over UDP. UDP has no "
+                    "acknowledgement, so delivery cannot be confirmed from here."
+                ),
+            }
+        except (OSError, ValueError) as exc:
+            results["syslog"] = {"ok": False, "detail": f"{type(exc).__name__}: {exc}"[:240]}
+        finally:
+            if handler is not None:
+                handler.close()
+    return results
 
 
 app.include_router(v1)

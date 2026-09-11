@@ -19,3 +19,13 @@ database/watchlist.key
 config/cameras.json
 config/dashboard_settings.json
 .env.bak-*
+
+# Pipeline -> dashboard live frames and health (integration/runtime_state.py)
+runtime/
+
+# Model weight bundle for sharing with teammates (see README "Model weights"
+# section) - regenerate with `zip -r models.zip models/`, don't commit it.
+models.zip
+
+# scripts/accuracy_eval.py output - real photos of whoever ran the capture.
+eval_runs/

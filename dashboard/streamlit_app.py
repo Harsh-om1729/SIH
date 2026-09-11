@@ -47,6 +47,7 @@ from config.settings import (
     CAMERA_HEIGHT,
     CAMERA_SOURCES,
     CAMERA_WIDTH,
+    CAMERA_ZONE_TIERS,
     CURFEW_END_HOUR,
     CURFEW_START_HOUR,
     DETECTION_CONFIDENCE,
@@ -57,6 +58,7 @@ from config.settings import (
 from database.incident_store import RESOLUTION_REASONS, IncidentStore
 from detection.draw import draw_detections
 from filtering.false_alarm import FalseAlarmFilter
+from intelligence.loiter import LoiterTracker
 from intelligence.threat_rules import ThreatRulesDB
 from intelligence.threat_score import ThreatScorer
 from preprocessing.enhance import Preprocessor
@@ -65,6 +67,17 @@ from zones.zone_engine import ZoneEngine
 
 TIER_COLORS_BGR = {"green": (0, 200, 0), "yellow": (0, 220, 220), "red": (0, 0, 255)}
 STATUS_BADGES = {"open": "🔴 OPEN", "acknowledged": "🟡 ACKNOWLEDGED", "resolved": "🟢 RESOLVED"}
+
+
+def zone_group_count(detections: list) -> int:
+    """How many people are inside a zone in this frame. Mirrors app.py's
+    helper of the same name — group risk is a property of the frame, not of
+    one detection, so a lone walker and one of five people at the line must
+    not read as the same score."""
+    return sum(
+        1 for d in detections
+        if d.category() == "person" and d.zone_tier and d.zone_tier != "none"
+    )
 
 st.set_page_config(page_title="IBVAP Dashboard", layout="wide")
 st.title("IBVAP — Operator Dashboard")
@@ -104,10 +117,12 @@ def build_pipeline():
                 config_path=f"config/zones_{n}.json",
                 curfew_start_hour=CURFEW_START_HOUR,
                 curfew_end_hour=CURFEW_END_HOUR,
+                fixed_tier=CAMERA_ZONE_TIERS.get(n),
             )
             for n in CAMERA_SOURCES
         },
         "threat_scorer": ThreatScorer(ThreatRulesDB()),
+        "loiter_trackers": {n: LoiterTracker() for n in CAMERA_SOURCES},
         "incident_store": incident_store,
         "alert_dispatcher": alert_dispatcher,
         "alert_manager": AlertManager(
@@ -118,6 +133,14 @@ def build_pipeline():
         "frame_counters": {n: 0 for n in CAMERA_SOURCES},
         "last_processed": {n: None for n in CAMERA_SOURCES},
         "frame_buffers": {n: [] for n in CAMERA_SOURCES},
+        # Server-wide, not per-session: build_pipeline() is a single
+        # @st.cache_resource shared by every browser tab pointed at this
+        # process, so "stop" here means "stop for everyone", same as the
+        # camera device itself. Closing a browser tab does NOT tear this
+        # pipeline down (Streamlit has no such hook for cache_resource) -
+        # this flag plus the buttons below are the only way to release the
+        # camera short of killing the streamlit process.
+        "camera_running": True,
     }
 
 
@@ -129,6 +152,25 @@ with st.sidebar:
         "Operator name",
         value=st.session_state.get("operator_name", "Duty Operator"),
         key="operator_name",
+    )
+    st.markdown("---")
+    st.markdown("### Camera Control")
+    if pipeline["camera_running"]:
+        st.success("Camera streams: RUNNING")
+        if st.button("⏹ Stop Camera", use_container_width=True):
+            pipeline["manager"].stop_all()
+            pipeline["camera_running"] = False
+            st.rerun()
+    else:
+        st.warning("Camera streams: STOPPED")
+        if st.button("▶ Start Camera", use_container_width=True):
+            pipeline["manager"].start_all()
+            pipeline["camera_running"] = True
+            st.rerun()
+    st.caption(
+        "Closing this browser tab does not release the camera - the "
+        "pipeline keeps running for any other tab open on it. Use Stop "
+        "Camera above, or Ctrl+C the `./run.sh dash` process, to free it."
     )
     st.markdown("---")
     st.markdown("### System Info")
@@ -143,6 +185,9 @@ with col_video:
 
     @st.fragment(run_every=0.2)
     def render_video_feed() -> None:
+        if not pipeline["camera_running"]:
+            st.info("Camera stopped. Press ▶ Start Camera in the sidebar to resume.")
+            return
         frames = pipeline["manager"].read_all()
         for name, frame in frames.items():
             if frame is None:
@@ -174,13 +219,26 @@ with col_video:
 
             draw_detections(processed, detections)
 
+            group_count = zone_group_count(detections)
             scores = []
             for det in detections:
+                # Same fallback as app.py: key dwell on the Re-ID person_id
+                # where available, else the raw track_id.
+                dwell_key = (
+                    ("person", det.person_id) if det.person_id is not None
+                    else ("track", det.track_id)
+                )
+                dwell = pipeline["loiter_trackers"][name].update(dwell_key, det.zone_tier)
                 score = pipeline["threat_scorer"].score(
                     zone_tier=det.zone_tier,
                     hour=datetime.now().hour,
                     speed_px_per_frame=det.speed,
                     category=det.category(),
+                    zone_direction=det.zone_direction,
+                    dwell_seconds=dwell,
+                    group_count=group_count,
+                    watchlist_match=det.watchlist_match,
+                    watchlist_similarity=det.watchlist_similarity,
                 )
                 scores.append(score)
                 x1, y1, x2, y2 = det.box

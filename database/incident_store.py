@@ -25,6 +25,38 @@ RESOLUTION_REASONS = [
 ]
 
 
+_BREAKDOWN_FIELDS = (
+    "sector_risk",
+    "time_risk",
+    "kinematics_risk",
+    "class_confidence",
+    "direction_risk",
+    "loiter_risk",
+    "group_risk",
+)
+
+
+def _score_breakdown(score) -> dict:
+    """The components of a ThreatScore, as stored alongside its total.
+
+    Tolerant of partial score objects — a component that is absent or not a
+    number is skipped rather than failing the insert, because losing an
+    incident over a missing diagnostic field would be the wrong trade.
+    """
+    out = {}
+    for field in _BREAKDOWN_FIELDS:
+        value = getattr(score, field, None)
+        try:
+            out[field] = round(float(value), 2)
+        except (TypeError, ValueError):
+            continue
+    for field in ("override_reason", "tier_ceiling", "ceiling_reason"):
+        value = getattr(score, field, None)
+        if isinstance(value, str) and value:
+            out[field] = value
+    return out
+
+
 class IncidentStore:
     """Persists alert-worthy events to a local, queryable `incidents.db` and
     encrypts the accompanying evidence images at rest (Fernet, per the
@@ -94,6 +126,13 @@ class IncidentStore:
             "resolved_by": "TEXT",
             "resolved_at": "REAL",
             "resolution_reason": "TEXT",
+            # Which camera raised it. Without this an alert cannot be traced to
+            # a location, and the dashboard can only say "unknown".
+            "camera_name": "TEXT",
+            # The threat-score components as JSON. Only total and tier were
+            # stored before, so an operator could see *that* something scored
+            # 84 but not whether that came from the zone, the hour or movement.
+            "breakdown": "TEXT",
         }
         for column, definition in new_columns.items():
             if column not in existing:
@@ -143,13 +182,17 @@ class IncidentStore:
             """
             INSERT INTO incidents
                 (track_id, person_id, category, zone_tier, score, tier, timestamp,
-                 snapshot_path, crop_path, burst_paths)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 snapshot_path, crop_path, burst_paths, camera_name, breakdown)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 det.track_id, det.person_id, det.category(), det.zone_tier,
                 score.total, score.tier, timestamp,
                 snapshot_path, crop_path, json.dumps(burst_paths),
+                # getattr: callers outside the live pipeline (tests, imports)
+                # may pass objects that never had a camera attached.
+                getattr(det, "camera_name", None),
+                json.dumps(_score_breakdown(score)),
             ),
         )
         self._conn.commit()
@@ -175,7 +218,7 @@ class IncidentStore:
         cur = self._conn.execute(
             "SELECT id, track_id, person_id, category, zone_tier, score, tier, timestamp, "
             "snapshot_path, crop_path, burst_paths, status, acknowledged_by, acknowledged_at, "
-            "resolved_by, resolved_at, resolution_reason "
+            "resolved_by, resolved_at, resolution_reason, camera_name, breakdown "
             "FROM incidents ORDER BY id DESC LIMIT ?",
             (limit,),
         )
@@ -186,7 +229,7 @@ class IncidentStore:
         cur = self._conn.execute(
             "SELECT id, track_id, person_id, category, zone_tier, score, tier, timestamp, "
             "snapshot_path, crop_path, burst_paths, status, acknowledged_by, acknowledged_at, "
-            "resolved_by, resolved_at, resolution_reason "
+            "resolved_by, resolved_at, resolution_reason, camera_name, breakdown "
             "FROM incidents WHERE id = ?",
             (incident_id,),
         )
