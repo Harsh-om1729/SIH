@@ -57,10 +57,26 @@ class TestThreatRulesDB(unittest.TestCase):
     def test_movement_config_has_expected_keys(self):
         db = self._db()
         config = db.get_movement_config()
-        self.assertIn("slow_speed_px_per_frame", config)
-        self.assertIn("fast_speed_px_per_frame", config)
-        self.assertIn("max_movement_risk", config)
+        for key in (
+            "still_speed_px_per_frame",
+            "walk_min_px_per_frame",
+            "walk_max_px_per_frame",
+            "fast_speed_px_per_frame",
+            "max_movement_risk",
+        ):
+            self.assertIn(key, config)
         self.assertLessEqual(config["max_movement_risk"], 30.0)
+
+    def test_movement_config_bands_are_ordered(self):
+        """The U-curve is only well-defined if the four speed bands ascend.
+        Out of order, _kinematics_risk divides by a negative interval and
+        returns risk outside 0..max — worth catching here rather than in a
+        live run, since these values are locally tunable by design."""
+        db = self._db()
+        config = db.get_movement_config()
+        self.assertLess(config["still_speed_px_per_frame"], config["walk_min_px_per_frame"])
+        self.assertLess(config["walk_min_px_per_frame"], config["walk_max_px_per_frame"])
+        self.assertLess(config["walk_max_px_per_frame"], config["fast_speed_px_per_frame"])
 
     def test_hand_edited_value_survives_reconnection_without_being_overwritten(self):
         """Rules are only seeded once; a locally tuned value must persist

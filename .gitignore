@@ -11,3 +11,10 @@ config/zones_*.json
 database/evidence.key
 database/transfer.key
 transfer_bundle.enc
+database/watchlist.key
+
+# Runtime state written by the dashboard, not configuration to be shared:
+# cameras added through the UI, and the pre-merge .env backup.
+config/cameras.json
+config/dashboard_settings.json
+.env.bak-*

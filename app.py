@@ -36,7 +36,10 @@ from activity_gate.gate import ActivityGate
 from alerts.alert_manager import AlertManager
 from camera.stream_manager import StreamManager
 from config.settings import (
+    ALERT_CONFIRM_N,
+    ALERT_CONFIRM_WINDOW,
     ALERT_COOLDOWN_SECONDS,
+    ALERT_MAX_COOLDOWN_SECONDS,
     BRIGHTNESS_THRESHOLD,
     CAMERA_HEIGHT,
     CAMERA_SOURCES,
@@ -68,7 +71,7 @@ from integration.syslog_notifier import SyslogNotifier
 from integration.webhook import WebhookNotifier
 from intelligence.loiter import LoiterTracker
 from intelligence.threat_rules import ThreatRulesDB
-from intelligence.threat_score import ThreatScore, ThreatScorer
+from intelligence.threat_score import ThreatScorer
 from preprocessing.enhance import Preprocessor
 from profiling.stage_profiler import StageProfiler
 from reid.embedder import OSNetEmbedder
@@ -156,22 +159,13 @@ def draw_threat_score_overlay(frame, det, scorer: ThreatScorer, dwell_seconds: f
         zone_direction=det.zone_direction,
         dwell_seconds=dwell_seconds,
         group_count=group_count,
+        # The watchlist escalation used to be applied here, after scoring, which
+        # put a scoring rule inside a drawing function and let it bypass the
+        # Phase 18 no-zone ceiling. The scorer owns it now, so the override and
+        # the ceiling that qualifies it are decided in one place.
+        watchlist_match=det.watchlist_match,
+        watchlist_similarity=det.watchlist_similarity,
     )
-    if det.watchlist_match is not None:
-        # A watchlist match escalates to Red regardless of zone score. Setting
-        # override_reason (not just the tier) is what makes breakdown() report
-        # the cause — without it this was the one path that went Red with no
-        # stated reason, logging an unexplained "score=70 zone=none" whenever a
-        # match happened outside a zone. The crossing override already works
-        # this way; this now matches it.
-        score.override_reason = (
-            f"watchlist match: {det.watchlist_match} "
-            f"(similarity={det.watchlist_similarity:.2f})"
-            if det.watchlist_similarity is not None
-            else f"watchlist match: {det.watchlist_match}"
-        )
-        score.tier = "red"
-        score.total = max(score.total, ThreatScore.OVERRIDE_MIN_TOTAL)
 
     x1, y1, x2, y2 = det.box
     color = TIER_COLORS[score.tier]
@@ -183,15 +177,20 @@ def draw_threat_score_overlay(frame, det, scorer: ThreatScorer, dwell_seconds: f
     )
     cv2.putText(frame, label, (x1, y2 + 16), cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1)
     if score.override_reason is not None:
+        banner = (
+            f"FORCED RED: {score.override_reason}"
+            if score.tier_ceiling is None
+            else f"{score.tier.upper()} (capped): {score.override_reason}"
+        )
         cv2.putText(
-            frame, f"FORCED RED: {score.override_reason}", (x1, y2 + 32),
+            frame, banner, (x1, y2 + 32),
             cv2.FONT_HERSHEY_SIMPLEX, 0.45, color, 1,
         )
     return score
 
 
 def main() -> None:
-    log.info("IBVAP starting up (Phase 16 — Command & Control Integration)")
+    log.info("IBVAP starting up (Phase 18 — Alert Discipline)")
 
     window_names = {name: f"IBVAP - {name} (press q to quit)" for name in CAMERA_SOURCES}
     for window_name in window_names.values():
@@ -256,6 +255,9 @@ def main() -> None:
     syslog = SyslogNotifier(host=SYSLOG_HOST, port=SYSLOG_PORT)
     alert_manager = AlertManager(
         cooldown_seconds=ALERT_COOLDOWN_SECONDS,
+        confirm_n=ALERT_CONFIRM_N,
+        confirm_window=ALERT_CONFIRM_WINDOW,
+        max_cooldown_seconds=ALERT_MAX_COOLDOWN_SECONDS,
         incident_store=incident_store,
         webhook=webhook,
         syslog=syslog,

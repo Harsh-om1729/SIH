@@ -51,6 +51,13 @@ class TestSyslogNotifier(unittest.TestCase):
             self.fail(f"emit() must not raise, but raised: {e}")
 
 
+_TEST_TOKEN = "test-token-not-a-real-secret"
+
+
+def _auth_header() -> dict:
+    return {"Authorization": f"Bearer {_TEST_TOKEN}"}
+
+
 class TestIncidentAPI(unittest.TestCase):
     def test_incidents_endpoint_returns_recorded_incidents(self):
         from fastapi.testclient import TestClient
@@ -79,9 +86,10 @@ class TestIncidentAPI(unittest.TestCase):
         def patched_init(self, *args, **kwargs):
             original_init(self, db_path=db_path, evidence_dir=evidence_dir, key_path=key_path)
 
-        with patch.object(IncidentStore, "__init__", patched_init):
+        with patch.object(IncidentStore, "__init__", patched_init), \
+                patch.object(api_module, "IBVAP_API_TOKEN", _TEST_TOKEN):
             client = TestClient(api_module.app)
-            response = client.get("/incidents")
+            response = client.get("/incidents", headers=_auth_header())
 
         self.assertEqual(response.status_code, 200)
         body = response.json()
@@ -93,11 +101,30 @@ class TestIncidentAPI(unittest.TestCase):
 
         import integration.api as api_module
 
-        client = TestClient(api_module.app)
-        response = client.get("/status")
+        with patch.object(api_module, "IBVAP_API_TOKEN", _TEST_TOKEN):
+            client = TestClient(api_module.app)
+            response = client.get("/status", headers=_auth_header())
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["status"], "ok")
+
+    def test_endpoints_refuse_unauthenticated_requests(self):
+        """Phase 17: the feed lists sightings with timestamps and zones, so
+        both endpoints must reject an unauthenticated caller even when a
+        token IS configured."""
+        from fastapi.testclient import TestClient
+
+        import integration.api as api_module
+
+        with patch.object(api_module, "IBVAP_API_TOKEN", _TEST_TOKEN):
+            client = TestClient(api_module.app)
+            for path in ("/status", "/incidents"):
+                self.assertEqual(client.get(path).status_code, 401, path)
+                self.assertEqual(
+                    client.get(path, headers={"Authorization": "Bearer wrong"}).status_code,
+                    401,
+                    path,
+                )
 
 
 if __name__ == "__main__":

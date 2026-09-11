@@ -36,6 +36,70 @@ python app.py
 - [x] Phase 15 — Cross-Camera Re-ID (single shared `PersonGallery` across all cameras, keyed by `(camera_name, track_id)` to prevent cross-camera ID collisions; unit tested + live-verified with 2 simultaneous streams. NOTE: the original "no false merging" claim here did not hold — later measurement showed the ImageNet ResNet-18 embedding merged different people; see the Phase 7 notes for the diagnosis and the OSNet fix.)
 - [x] Phase 16 — Command & Control Integration (FastAPI `/incidents` + `/status` JSON endpoints, outbound webhook, syslog-formatted UDP events — all fail-safe/non-blocking if unreachable; VHF/LoRa stays a logged stand-in per Phase 11, no real radio hardware; unit tested + live-verified)
 
+## Hardening phases (17-25)
+
+Phases 0-16 built the capability; these make it hold up under evaluation and
+under a month of unattended running. Findings and rationale live in
+`../IBVAP_Audit.md`; the phase plan is `../IBVAP_Hardening_Roadmap.md`.
+
+- [x] Phase 17 - Truth in Documentation (ANPR claim corrected in the Roadmap
+      capability table and pitch deck - no `anpr/` module exists; the four
+      stale threat-score tests rewritten for the U-curve; `IBVAP_API_TOKEN`
+      bearer auth implemented in `integration/api.py` so `.env`'s long-standing
+      claim is now true, with 5 tests; `WATCHLIST_KEY_PATH` and
+      `ALERT_DISPATCH_QUEUE_SIZE` removed as unimplemented, `.env` and
+      `.env.example` brought back into sync; orphan `database/watchlist.key`
+      deleted and untracked. Suite: 83 tests, 1 expected failure - see below)
+- [x] Phase 18 - Alert Discipline (N-of-M confirmation: a tier must be observed
+      `ALERT_CONFIRM_N` times in the last `ALERT_CONFIRM_WINDOW` scoring cycles
+      before it can alert; hysteresis: a confirmed tier is released only once
+      the whole window sits below it; exponential backoff on repeats up to
+      `ALERT_MAX_COOLDOWN_SECONDS`; and a no-zone ceiling capping un-zoned
+      footage at Yellow. The watchlist override moved out of
+      `draw_threat_score_overlay()` into `ThreatScorer.score()` - it was a
+      scoring rule living in a drawing function, and it bypassed the ceiling
+      from there. 14 new tests; suite now 98 tests, 1 expected failure)
+- [ ] Phase 19 - Zone & Score Correctness (demo zones, sustained-presence override, scale-normalised speed)
+- [ ] Phase 20 - Survivability (camera reconnect, real `/status` health, non-blocking dispatch, retention, dict purges)
+- [ ] Phase 21 - Measured Accuracy (labelled set, precision/recall, range bands, Intel benchmark)
+- [ ] Phase 22 - Deployability (headless mode, systemd, single-service dashboard)
+- [ ] Phase 23 - Multi-Camera Scale (shared model + batched inference)
+- [ ] Phase 24 - Compliance & Evidence Integrity (watchlist audit log, hash chain)
+- [ ] Phase 25 - Environmental Robustness (contrast-triggered enhancement, dehaze, activity gate, zone drift)
+
+### Phase 18 measured effect
+
+Before, one stationary person in a 52-second window produced **nine Red alerts**
+- six on the 8s cooldown, and three more 1-2s apart. Those three came from the
+escalation bypass: the base score with no zones drawn is `time 4 + move 10 +
+class 12 = 26`, which is Green, so whenever the watchlist similarity dipped
+under its 0.50 threshold the tier fell to Green and the next frame re-escalated
+to Red, skipping the cooldown by design. The similarities that run were 0.50,
+0.52, 0.57, 0.64 - sitting on the line.
+
+After, the same scene over 28 seconds produced **zero Red alerts and one
+Yellow**:
+
+    YELLOW ALERT: person #5 score=69 [time 4 + class 12
+      [forced RED: watchlist match: Test Subject (similarity=0.55)]
+      [capped at YELLOW: no zone defined for this camera]] - chime + snapshot
+
+That is the intended shape: the match is still detected, still logged with its
+reason, still recorded as an incident with evidence - it just does not sound a
+siren on a 0.55 similarity in footage where the system cannot tell where the
+person is standing. Draw zones and the ceiling lifts.
+
+### Known gap carried as an expected failure
+
+`tests/test_threat_score.py::test_person_in_red_zone_at_night_moving_fast_scores_red`
+is marked `@unittest.expectedFailure`, not deleted or relaxed. A person in the
+red zone at 2am moving fast, with no direction label, totals 65 -> Yellow;
+Red is currently reachable only via the crossing override, which needs >=4px
+of movement, so a stationary or distant subject never escalates. The assertion
+is right and the scoring is wrong - Phase 19 adds a sustained-presence
+override, after which the decorator comes off.
+
+
 ## Phase 5 benchmark notes (measured on Apple M4, run via `scripts/benchmark_models.py`)
 
 | Model | Avg latency | FPS |

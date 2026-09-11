@@ -8,7 +8,7 @@ class ThreatScore:
     __slots__ = (
         "sector_risk", "time_risk", "kinematics_risk", "class_confidence",
         "direction_risk", "loiter_risk", "group_risk", "total", "tier",
-        "override_reason",
+        "override_reason", "tier_ceiling", "ceiling_reason",
     )
 
     # A breach of the border line is a priority event whatever the clock says.
@@ -17,6 +17,9 @@ class ThreatScore:
     # pattern the watchlist match already uses. The component breakdown is
     # still reported, so the escalation stays transparent rather than magic.
     OVERRIDE_MIN_TOTAL = 70.0
+
+    TIER_RANK = {"green": 0, "yellow": 1, "red": 2}
+    TIER_MAX_TOTAL = {"green": float(GREEN_MAX), "yellow": float(YELLOW_MAX), "red": 100.0}
 
     def __init__(
         self,
@@ -28,6 +31,8 @@ class ThreatScore:
         loiter_risk: float = 0.0,
         group_risk: float = 0.0,
         override_reason: "str | None" = None,
+        tier_ceiling: "str | None" = None,
+        ceiling_reason: "str | None" = None,
     ):
         self.sector_risk = sector_risk
         self.time_risk = time_risk
@@ -53,6 +58,19 @@ class ThreatScore:
             self.tier = "red"
             self.total = max(self.total, self.OVERRIDE_MIN_TOTAL)
 
+        # Phase 18: the ceiling is applied last, so it binds the overrides too.
+        # An override says "this pattern matters"; the ceiling says "we cannot
+        # tell where this is happening", and the second qualifies the first —
+        # otherwise un-zoned footage still emits Red on a borderline match,
+        # which is the alert flood Phase 18 exists to stop. The reason is kept
+        # and reported, so a capped alert reads as a deliberate downgrade
+        # rather than a missing detection.
+        self.tier_ceiling = tier_ceiling
+        self.ceiling_reason = ceiling_reason
+        if tier_ceiling is not None and self.TIER_RANK[self.tier] > self.TIER_RANK[tier_ceiling]:
+            self.tier = tier_ceiling
+            self.total = min(self.total, self.TIER_MAX_TOTAL[tier_ceiling])
+
     def breakdown(self) -> str:
         """One-line "why", for the log and the on-screen overlay. Only the
         components that actually contributed are listed, so a sentry reads the
@@ -66,6 +84,8 @@ class ThreatScore:
         summary = " + ".join(f"{n} {v:.0f}" for n, v in parts if v > 0) or "none"
         if self.override_reason is not None:
             summary += f"  [forced RED: {self.override_reason}]"
+        if self.ceiling_reason is not None and self.tier_ceiling is not None:
+            summary += f"  [capped at {self.tier_ceiling.upper()}: {self.ceiling_reason}]"
         return summary
 
 
@@ -104,6 +124,8 @@ class ThreatScorer:
         zone_direction: "str | None" = None,
         dwell_seconds: float = 0.0,
         group_count: int = 1,
+        watchlist_match: "str | None" = None,
+        watchlist_similarity: "float | None" = None,
     ) -> ThreatScore:
         sector_risk = self.rules.get_sector_risk(zone_tier or "none")
         time_risk = self.rules.get_time_risk(hour)
@@ -124,10 +146,19 @@ class ThreatScorer:
             self.rules.get_group_risk(group_count) if in_zone and is_person else 0.0
         )
 
+        # A watchlist hit outranks a crossing: it names *who* this is, not just
+        # what they did. Both are reported the same way so the log states the
+        # cause either way.
+        override_reason = self._watchlist_override(
+            watchlist_match, watchlist_similarity
+        ) or self._crossing_override(zone_tier, zone_direction, category)
+
         return ThreatScore(
             sector_risk, time_risk, kinematics_risk, class_confidence,
             direction_risk, loiter_risk, group_risk,
-            override_reason=self._crossing_override(zone_tier, zone_direction, category),
+            override_reason=override_reason,
+            tier_ceiling=None if in_zone else self.NO_ZONE_CEILING,
+            ceiling_reason=None if in_zone else "no zone defined for this camera",
         )
 
     # Animals are deliberately exempt: livestock and strays cross a border line
@@ -135,6 +166,22 @@ class ThreatScorer:
     # source that gets a system switched off.
     CROSSING_DIRECTIONS = ("inward", "outward", "crossing")
     OVERRIDE_CATEGORIES = ("person", "vehicle")
+
+    # Phase 18: with no zones drawn, every geographic term in the score is
+    # unavailable — there is no sector, no line to cross, nothing to loiter at.
+    # Scoring anything Red on the remaining time/speed/class terms alone claims
+    # a certainty the system does not have, so un-zoned footage tops out at
+    # Yellow: still logged, still snapshotted, no siren.
+    NO_ZONE_CEILING = "yellow"
+
+    def _watchlist_override(
+        self, match_name: "str | None", similarity: "float | None"
+    ) -> "str | None":
+        if match_name is None:
+            return None
+        if similarity is None:
+            return f"watchlist match: {match_name}"
+        return f"watchlist match: {match_name} (similarity={similarity:.2f})"
 
     def _crossing_override(
         self, zone_tier: str, zone_direction: "str | None", category: str

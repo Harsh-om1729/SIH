@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+from collections import deque
 
 import cv2
 import numpy as np
@@ -35,9 +36,25 @@ class AlertManager:
       frame repeated) + a logged stand-in for optional VHF/LoRa radio
       metadata (no real radio hardware in this zero-cost build).
 
-    Rate-limited per track: an escalation (tier increasing) always alerts
-    immediately; otherwise a track only re-alerts after `cooldown_seconds`,
-    so a siren/snapshot doesn't spam every frame while someone lingers.
+    Rate-limited per track, in three layers (Phase 18 — alert discipline):
+
+    1. N-of-M confirmation. A tier must be observed `confirm_n` times in the
+       last `confirm_window` scoring cycles before it is *confirmed*. A single
+       borderline frame — a face similarity landing on 0.50, one noisy speed
+       estimate — can no longer start an incident.
+    2. Hysteresis on the way down. A confirmed tier is only released once the
+       whole window sits below it. Without this, a score oscillating around a
+       threshold kept de-escalating and re-escalating, and since an escalation
+       bypasses the cooldown by design, every oscillation bought a free siren:
+       the observed failure was nine Red alerts for one stationary person in
+       52 seconds, two of them 1-2s apart.
+    3. Backoff on repeats. A track that stays at the same confirmed tier
+       re-alerts after `cooldown_seconds`, then twice that, then twice again,
+       capped at `max_cooldown_seconds` — so a genuine sustained presence is
+       reported promptly and then stops shouting.
+
+    An escalation to a *newly confirmed* higher tier still alerts immediately;
+    that is the point of confirming it.
     """
 
     TIER_RANK = {"green": 0, "yellow": 1, "red": 2}
@@ -50,9 +67,20 @@ class AlertManager:
         incident_store=None,
         webhook=None,
         syslog=None,
+        confirm_n: int = 2,
+        confirm_window: int = 3,
+        max_cooldown_seconds: float = 64.0,
     ):
+        if confirm_n > confirm_window:
+            raise ValueError(
+                f"confirm_n ({confirm_n}) cannot exceed confirm_window ({confirm_window}) "
+                "— no tier would ever confirm and the system would go silent"
+            )
         self.snapshot_dir = snapshot_dir
         self.cooldown_seconds = cooldown_seconds
+        self.confirm_n = confirm_n
+        self.confirm_window = confirm_window
+        self.max_cooldown_seconds = max_cooldown_seconds
         self._now = now_fn
         self.incident_store = incident_store
         self.webhook = webhook
@@ -60,6 +88,8 @@ class AlertManager:
         os.makedirs(snapshot_dir, exist_ok=True)
         self._last_tier: dict = {}
         self._last_alert_time: dict = {}
+        self._history: dict = {}
+        self._repeats: dict = {}
 
         self._yellow_chime = _synth_tone(880, 0.15, volume=0.25) if _AUDIO_AVAILABLE else None
         self._red_siren = _synth_tone(1200, 0.4, volume=0.5) if _AUDIO_AVAILABLE else None
@@ -77,23 +107,31 @@ class AlertManager:
         label = (
             f"#{det.person_id}" if det.person_id is not None else f"T{det.track_id}"
         )
-        tier = score.tier
+        prev_tier = self._last_tier.get(track_key, "green")
+        tier = self._confirmed_tier(track_key, score.tier)
 
         if tier == "green":
-            log.debug("Green: %s %s score=%.0f", det.category(), label, score.total)
-            self._last_tier[track_key] = tier
+            log.debug(
+                "Green: %s %s score=%.0f (observed %s)",
+                det.category(), label, score.total, score.tier,
+            )
             return
 
         now = self._now()
-        prev_tier = self._last_tier.get(track_key, "green")
         escalated = self.TIER_RANK.get(tier, 0) > self.TIER_RANK.get(prev_tier, 0)
-        cooled_down = now - self._last_alert_time.get(track_key, 0) >= self.cooldown_seconds
+        if escalated:
+            # A newly confirmed higher tier resets the backoff: this is a
+            # different event from the one already being reported.
+            self._repeats[track_key] = 0
+        cooled_down = (
+            now - self._last_alert_time.get(track_key, 0) >= self._effective_cooldown(track_key)
+        )
 
         if not (escalated or cooled_down):
-            self._last_tier[track_key] = tier
             return
+        if not escalated:
+            self._repeats[track_key] = self._repeats.get(track_key, 0) + 1
 
-        self._last_tier[track_key] = tier
         self._last_alert_time[track_key] = now
         self._notify_integrations(det, score, track_key, now)
 
@@ -119,6 +157,51 @@ class AlertManager:
             )
             self._play(self._red_siren)
             self._record_evidence(det, score, recent_frames)
+
+    def _confirmed_tier(self, track_key, observed_tier: str) -> str:
+        """N-of-M confirmation on the way up, full-window hysteresis on the way
+        down. Returns the tier the alerting logic should act on, which is not
+        necessarily the tier this single frame scored."""
+        history = self._history.setdefault(
+            track_key, deque(maxlen=self.confirm_window)
+        )
+        history.append(observed_tier)
+        confirmed = self._last_tier.get(track_key, "green")
+
+        # Up: any tier above the confirmed one that has reached N observations
+        # in the window. Highest such tier wins, so a burst of Red is not
+        # masked by the Yellows around it.
+        for candidate in ("red", "yellow"):
+            if self.TIER_RANK[candidate] <= self.TIER_RANK[confirmed]:
+                break
+            if history.count(candidate) >= self.confirm_n:
+                self._last_tier[track_key] = candidate
+                return candidate
+
+        # Down: only once the window is full *and* every observation in it sits
+        # below the confirmed tier. A lone sub-threshold frame no longer drops
+        # the tier — which is what previously let the next frame re-escalate
+        # and bypass the cooldown.
+        if len(history) == self.confirm_window and all(
+            self.TIER_RANK[t] < self.TIER_RANK[confirmed] for t in history
+        ):
+            released = max(history, key=lambda t: self.TIER_RANK[t])
+            self._last_tier[track_key] = released
+            return released
+
+        self._last_tier[track_key] = confirmed
+        return confirmed
+
+    def _effective_cooldown(self, track_key) -> float:
+        """Exponential backoff for a track parked at the same confirmed tier."""
+        repeats = self._repeats.get(track_key, 0)
+        return min(self.cooldown_seconds * (2 ** repeats), self.max_cooldown_seconds)
+
+    def forget(self, track_key) -> None:
+        """Drops all per-track state. Callers that retire tracks should use it;
+        without it these dicts grow for the life of the process (Phase 20)."""
+        for state in (self._last_tier, self._last_alert_time, self._history, self._repeats):
+            state.pop(track_key, None)
 
     def _play(self, sound) -> None:
         if sound is not None:
