@@ -1,11 +1,10 @@
 import React from 'react';
 
 /**
- * Says out loud where the rows on this page came from.
- *
- * Without it a page served from mockIncidents.ts is visually identical to one
- * served from incidents.db — which is how you end up demonstrating invented
- * data believing it is your model's output.
+ * Says out loud when the backend didn't answer, so an empty page reads as
+ * "offline" rather than "nothing happened" or "silently full of fake rows".
+ * No page falls back to invented data anymore — an unreachable backend
+ * yields an empty list, not sample incidents dressed up as real ones.
  */
 export const DataSourceBadge: React.FC<{ isMock: boolean; error?: string | null }> = ({
   isMock,
@@ -28,7 +27,7 @@ export const DataSourceBadge: React.FC<{ isMock: boolean; error?: string | null 
       className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-amber-500/40 bg-amber-500/10 text-amber-300 text-[10px] font-mono uppercase tracking-wider"
     >
       <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-      Demo data — backend offline
+      Backend unreachable — no data
     </span>
   );
 };

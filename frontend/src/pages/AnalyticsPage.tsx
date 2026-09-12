@@ -89,7 +89,7 @@ export const AnalyticsPage: React.FC = () => {
 
         <div className="flex items-center gap-2 font-mono text-[11px] text-text-dim bg-black/60 px-3.5 py-2 rounded-xl border border-white/10 shadow-inner">
           <Clock className="w-3.5 h-3.5 text-accent-teal" />
-          <span>Data range: Last 24 hours (tactical simulation)</span>
+          <span>Data range: Last 24 hours</span>
         </div>
       </div>
 

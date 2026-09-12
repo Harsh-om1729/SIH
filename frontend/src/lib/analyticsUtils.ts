@@ -1,4 +1,4 @@
-import { mockIncidents, Incident } from './mockIncidents';
+import { Incident } from './mockIncidents';
 
 export interface DashboardStats {
   totalIncidents: number;
@@ -56,7 +56,7 @@ export interface RealtimeThreatPoint {
 }
 
 // 1. Derive Summary KPI Numbers
-export function getDashboardStats(incidents: Incident[] = mockIncidents): DashboardStats {
+export function getDashboardStats(incidents: Incident[]): DashboardStats {
   const totalIncidents = incidents.length;
   const redAlerts = incidents.filter((i) => i.tier === 'red').length;
   const yellowAlerts = incidents.filter((i) => i.tier === 'yellow').length;
@@ -79,7 +79,7 @@ export function getDashboardStats(incidents: Incident[] = mockIncidents): Dashbo
 
 // 2. Derive Real-Time Telemetry Stream (Synchronized with incoming alert notifications)
 export function getRealtimeThreatStream(
-  incidents: Incident[] = mockIncidents,
+  incidents: Incident[],
   maxPoints = 14
 ): RealtimeThreatPoint[] {
   // Sort chronologically ascending (oldest to newest) so stream moves left-to-right
@@ -112,7 +112,7 @@ export function getRealtimeThreatStream(
 }
 
 // 3. Derive 24-Hour Threat Timeline
-export function getHourlyThreatTimeline(incidents: Incident[] = mockIncidents): TimelineBucket[] {
+export function getHourlyThreatTimeline(incidents: Incident[]): TimelineBucket[] {
   const now = Math.floor(Date.now() / 1000);
   // Create 6 4-hour intervals covering the 24h window
   const intervals = [
@@ -145,7 +145,7 @@ export function getHourlyThreatTimeline(incidents: Incident[] = mockIncidents): 
 
 
 // 3. Category Distribution (Donut Chart)
-export function getCategoryDistribution(incidents: Incident[] = mockIncidents): CategoryData[] {
+export function getCategoryDistribution(incidents: Incident[]): CategoryData[] {
   const persons = incidents.filter((i) => i.category === 'person').length;
   const vehicles = incidents.filter((i) => i.category === 'vehicle').length;
   const unknown = incidents.filter((i) => i.category === 'unknown').length;
@@ -158,7 +158,7 @@ export function getCategoryDistribution(incidents: Incident[] = mockIncidents): 
 }
 
 // 4. Camera Channel Alert Breakdown
-export function getCameraDistribution(incidents: Incident[] = mockIncidents): CameraAlertData[] {
+export function getCameraDistribution(incidents: Incident[]): CameraAlertData[] {
   const cameraMap: Record<string, { red: number; yellow: number; green: number }> = {
     cam0: { red: 0, yellow: 0, green: 0 },
     cam1: { red: 0, yellow: 0, green: 0 },
@@ -186,7 +186,7 @@ export function getCameraDistribution(incidents: Incident[] = mockIncidents): Ca
 }
 
 // 5. Tier Breakdown
-export function getTierDistribution(incidents: Incident[] = mockIncidents): TierData[] {
+export function getTierDistribution(incidents: Incident[]): TierData[] {
   const green = incidents.filter((i) => i.tier === 'green').length;
   const yellow = incidents.filter((i) => i.tier === 'yellow').length;
   const red = incidents.filter((i) => i.tier === 'red').length;
@@ -199,7 +199,7 @@ export function getTierDistribution(incidents: Incident[] = mockIncidents): Tier
 }
 
 // 6. 24-Hour Curfew Activity Histogram (00:00 to 23:00)
-export function getPeakHourlyActivity(incidents: Incident[] = mockIncidents): HourlyActivityData[] {
+export function getPeakHourlyActivity(incidents: Incident[]): HourlyActivityData[] {
   // Buckets for 24 hours of the day
   const hours = Array.from({ length: 24 }, (_, h) => {
     const hourStr = `${h.toString().padStart(2, '0')}:00`;
@@ -219,18 +219,6 @@ export function getPeakHourlyActivity(incidents: Incident[] = mockIncidents): Ho
       hours[h].count++;
     }
   });
-
-  // Ensure realistic curve for visual representation if mock timestamps are recent
-  // by seeding slight night-time activity variation:
-  hours[1].count += 3;
-  hours[2].count += 4;
-  hours[3].count += 2;
-  hours[4].count += 3;
-  hours[14].count += 2;
-  hours[15].count += 3;
-  hours[16].count += 4;
-  hours[22].count += 2;
-  hours[23].count += 3;
 
   return hours;
 }
