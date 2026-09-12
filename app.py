@@ -53,6 +53,7 @@ from config.settings import (
     CURFEW_START_HOUR,
     DETECTION_CONFIDENCE,
     DETECTION_MODEL_PATH,
+    HARDWARE_PROFILE,
     IDLE_MIN_FPS,
     MOTION_THRESHOLD,
     REID_FACE_CHECK_INTERVAL,
@@ -66,6 +67,7 @@ from config.settings import (
     WEBHOOK_URL,
     configure_logging,
 )
+from config.providers import select_providers
 from database.incident_store import IncidentStore
 from detection.draw import draw_detections
 from face.face_recognizer import FaceRecognizer
@@ -317,6 +319,8 @@ def main() -> None:
         "detector": DETECTION_MODEL_PATH,
         "reid": REID_MODEL_PATH,
         "face": "insightface/buffalo_s",
+        "profile": HARDWARE_PROFILE,
+        "providers": ", ".join(select_providers()),
     }
 
     def process_camera_frame(name: str, frame) -> None:

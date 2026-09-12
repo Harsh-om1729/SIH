@@ -99,7 +99,18 @@ def main() -> None:
                          "a controlled A/B. Patches the harness only — the shipped "
                          "module is untouched, so both arms run identical code "
                          "everywhere else.")
+    ap.add_argument("--cpu-only", action="store_true",
+                    help="hide every ONNX Runtime accelerator (CoreML, OpenVINO, ...) "
+                         "so all three models run on the plain CPU provider - the "
+                         "closest this machine gets to an Intel box with no "
+                         "accelerator installed. Still a faster CPU than an i3, so "
+                         "treat the result as an upper bound, not the Intel number.")
     args = ap.parse_args()
+
+    if args.cpu_only:
+        import onnxruntime as _ort
+
+        _ort.get_available_providers = lambda: ["CPUExecutionProvider"]
 
     if args.legacy_median:
         import numpy as _np

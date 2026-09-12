@@ -4,7 +4,7 @@ import time
 
 from ultralytics import YOLO
 
-from detection.detector import RELEVANT_CLASS_IDS, Detection
+from detection.detector import RELEVANT_CLASS_IDS, Detection, model_input_size
 from tracking.history import TrackHistory
 
 log = logging.getLogger("ibvap.tracking")
@@ -40,7 +40,9 @@ class Tracker:
         now_fn=time.time,
     ):
         log.info("Loading YOLO model for tracking: %s", model_path)
-        self._model = YOLO(model_path)
+        self._model = YOLO(model_path, task="detect")
+        size = model_input_size(model_path)
+        self._size_kwargs = {"imgsz": size} if size else {}
         self.confidence = confidence
         self.history_len = history_len
         self.tracker_config = tracker_config
@@ -55,6 +57,7 @@ class Tracker:
             persist=True,
             tracker=self.tracker_config,
             verbose=False,
+            **self._size_kwargs,
         )[0]
 
         detections = []

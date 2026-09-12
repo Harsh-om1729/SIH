@@ -91,6 +91,11 @@ under a month of unattended running. Findings and rationale live in
 - [ ] Phase 23 - Multi-Camera Scale (shared model + batched inference)
 - [ ] Phase 24 - Compliance & Evidence Integrity (watchlist audit log, hash chain)
 - [ ] Phase 25 - Environmental Robustness (contrast-triggered enhancement, dehaze, activity gate, zone drift)
+- [x] Phase 26 - Low-Power Hardware Profile (`HARDWARE_PROFILE=low`: 416-input
+      detector, 1 ORT thread, fewer identity re-checks, lower idle rate.
+      CPU-only 16.1 -> 33.8 fps at under one core, no precision/recall loss on
+      the reviewed frames. OpenVINO provider path wired, not yet measured on
+      Intel - see the section below)
 
 ### Phase 18 measured effect
 
@@ -123,6 +128,66 @@ Red is currently reachable only via the crossing override, which needs >=4px
 of movement, so a stationary or distant subject never escalates. The assertion
 is right and the scoring is wrong - Phase 19 adds a sustained-presence
 override, after which the decorator comes off.
+
+### Phase 26 — Low-Power Hardware Profile
+
+Every number above was measured on an Apple M4 with CoreML; the field target
+is an Intel i3/i5 box with no GPU, and a teammate's Intel laptop topped out
+around 10 fps with visible stutter. `HARDWARE_PROFILE=low` in `.env` is the
+fix, as one switch:
+
+| Setting | standard | low | Why |
+|---|---|---|---|
+| `DETECTION_MODEL_PATH` | `yolov8s.onnx` (640) | `yolov8n_416.onnx` | detection was 85% of CPU-only frame time |
+| `ORT_NUM_THREADS` | 2 | 1 | three ORT sessions × 2 threads oversubscribe a 2–4 core CPU |
+| `REID_FACE_CHECK_INTERVAL` | 5 | 10 | halves identity re-checks for already-resolved tracks |
+| `IDLE_MIN_FPS` | 20 | 5 | a quiet scene needn't cost a full pipeline pass 20×/s |
+
+Any of the four set explicitly in the environment still wins over the profile.
+
+**Measured CPU-only** (`scripts/bench_pipeline.py --cpu-only` hides every
+accelerator — but it's still the M4's CPU, so treat this as an upper bound,
+not the Intel number. Re-ID and face run every frame in this harness, so the
+interval and idle savings above come on top):
+
+| | standard | low (1 thread) | low, 2 threads |
+|---|---|---|---|
+| throughput | 16.1 fps | 33.8 fps | 42.5 fps |
+| CPU used | 220% of a core | 96% | 262% |
+| detect_track | 45.8 ms | 10.7 ms | 9.2 ms |
+
+With the accelerator left on (a normal run on the M4), the same comparison is
+15.9 → 34.2 fps at 183% → 71% of one core; detection drops to 3 ms, and face
+recognition becomes the new bottleneck (54% of frame time).
+
+On a many-core machine 2 threads is 26% faster; `low` still uses 1 because it
+fits in one core, which on a 2-core i3 is the difference between headroom and
+contention. Measure both on the real box (`implementation_plan.md`).
+
+**Accuracy didn't pay for it** (`scripts/accuracy_eval.py --replay`, the same
+36 reviewed frames and labels for every model): yolov8s@640 94.7% precision /
+100% recall; yolov8n@640 97.3% / 100%; yolov8n@416 97.3% / 100%; yolov8n@320
+100% / 100%. The honest limit: every subject in that capture is close to the
+camera, and a smaller input loses far-away people first — which this sample
+never tests. That's why `low` uses 416, not 320; `models/yolov8n_320.onnx` is
+there for the weakest boxes, with that caveat.
+
+The 416/320 files are fixed-shape exports of the same `yolov8n.pt`
+(`YOLO("yolov8n.pt").export(format="onnx", imgsz=416)`), gitignored like every
+weight file and shipped in `models.zip`. Ultralytics predicts at 640 unless
+told otherwise, and a fixed 416 export rejects a 640 tensor, so `Tracker` and
+`Detector` now read the input size from the file
+(`detection.detector.model_input_size`).
+
+**OpenVINO: wired, not measured.** Re-ID and face used to hardcode
+`CPUExecutionProvider`, so an installed accelerator was ignored for 55% of
+per-frame time. They now call `config.providers.select_providers()`, which
+prefers OpenVINO when `onnxruntime-openvino` is installed and falls back to
+CPU otherwise (the detector already picks its own provider via Ultralytics).
+None of this has run on Intel yet — installing it and taking the before/after
+numbers on the target machine is `implementation_plan.md`. The dashboard's
+Settings → AI Models card shows the active profile and provider. 15 tests in
+`tests/test_low_power.py`.
 
 ### Per-camera fixed zone tiers (alternative to drawn polygons)
 

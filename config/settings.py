@@ -5,6 +5,41 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# --- Hardware profile ------------------------------------------------------
+# One switch for the four settings that decide whether the pipeline keeps up
+# on a weak box. "standard" is the Apple-M4 tuning every earlier phase was
+# measured on; "low" is Phase 26's Intel-i3/i5-with-no-GPU tuning, measured
+# CPU-only with scripts/bench_pipeline.py --cpu-only (16.1 -> 33.8 fps, 220%
+# -> 96% of one core) and scripts/accuracy_eval.py --replay (no precision or
+# recall loss on the reviewed frames). A value set explicitly in the
+# environment still wins, so the profile never overrides a deliberate choice.
+HARDWARE_PROFILES = {
+    "standard": {
+        "DETECTION_MODEL_PATH": "models/yolov8s.onnx",
+        "ORT_NUM_THREADS": "2",
+        "REID_FACE_CHECK_INTERVAL": "5",
+        "IDLE_MIN_FPS": "20",
+    },
+    "low": {
+        "DETECTION_MODEL_PATH": "models/yolov8n_416.onnx",
+        "ORT_NUM_THREADS": "1",
+        "REID_FACE_CHECK_INTERVAL": "10",
+        "IDLE_MIN_FPS": "5",
+    },
+}
+HARDWARE_PROFILE = (os.getenv("HARDWARE_PROFILE") or "standard").strip().lower()
+if HARDWARE_PROFILE not in HARDWARE_PROFILES:
+    logging.getLogger("ibvap").warning(
+        "HARDWARE_PROFILE=%r is not one of %s - using 'standard'",
+        HARDWARE_PROFILE, sorted(HARDWARE_PROFILES),
+    )
+    HARDWARE_PROFILE = "standard"
+
+
+def _profiled(name: str) -> str:
+    return os.getenv(name) or HARDWARE_PROFILES[HARDWARE_PROFILE][name]
+
+
 # --- ONNX Runtime thread limits --------------------------------------------
 # MUST be set before onnxruntime is imported, which is why it lives here: both
 # app.py and scripts/bench_pipeline.py import config.settings before any module
@@ -24,7 +59,7 @@ load_dotenv()
 # 2 is the latency optimum. Set ORT_NUM_THREADS=1 instead on a machine that has
 # to share its CPU with other work: 24% slower than 2, but a seventh of the CPU
 # and still faster than the unbounded default. 0 restores ORT's own choice.
-ORT_NUM_THREADS = int(os.getenv("ORT_NUM_THREADS", "2"))
+ORT_NUM_THREADS = int(_profiled("ORT_NUM_THREADS"))
 if ORT_NUM_THREADS > 0:
     for _var in (
         "OMP_NUM_THREADS", "ORT_INTRA_OP_NUM_THREADS",
@@ -93,13 +128,13 @@ MOTION_THRESHOLD = float(os.getenv("MOTION_THRESHOLD", "2.0"))
 # which made the idle rate depend on the camera: the same divisor of 10 gave
 # 3 fps on a 30 fps webcam and 1.5 fps on a 15 fps one. A rate in fps is what
 # an operator actually wants to specify, and it holds across mismatched cameras.
-IDLE_MIN_FPS = float(os.getenv("IDLE_MIN_FPS", "20"))
+IDLE_MIN_FPS = float(_profiled("IDLE_MIN_FPS"))
 
 # Minimum YOLO confidence to keep a detection
 DETECTION_CONFIDENCE = float(os.getenv("DETECTION_CONFIDENCE", "0.5"))
 
 # Path to the model file the detector loads (.pt, .onnx, or an int8 .onnx)
-DETECTION_MODEL_PATH = os.getenv("DETECTION_MODEL_PATH", "models/yolov8s.onnx")
+DETECTION_MODEL_PATH = _profiled("DETECTION_MODEL_PATH")
 
 # Requested camera capture resolution. Cameras often default to a much higher
 # resolution (e.g. 1080p) which inflates every downstream stage for no benefit.
@@ -228,7 +263,7 @@ SYSLOG_PORT = int(os.getenv("SYSLOG_PORT", "514"))
 # A brand-new (not-yet-resolved) track is never throttled by this — it still
 # gets checked every frame, since PersonGallery needs consecutive samples to
 # decide an identity in the first place.
-REID_FACE_CHECK_INTERVAL = int(os.getenv("REID_FACE_CHECK_INTERVAL", "5"))
+REID_FACE_CHECK_INTERVAL = int(_profiled("REID_FACE_CHECK_INTERVAL"))
 
 # Fernet key protecting watchlist face embeddings at rest (face/watchlist.py).
 # Same mechanism as the evidence store; kept in its own file so biometric data

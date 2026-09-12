@@ -3,6 +3,8 @@ import logging
 import numpy as np
 from insightface.app import FaceAnalysis
 
+from config.providers import select_providers
+
 log = logging.getLogger("ibvap.face")
 
 
@@ -41,7 +43,7 @@ class FaceRecognizer:
         # (the discarded modules run per detected face, not per call).
         self._app = FaceAnalysis(
             name="buffalo_s",
-            providers=["CPUExecutionProvider"],
+            providers=select_providers(),
             allowed_modules=["detection", "recognition"],
         )
         self._app.prepare(ctx_id=0, det_size=det_size, det_thresh=det_thresh)

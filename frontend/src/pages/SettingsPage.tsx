@@ -401,7 +401,11 @@ export const SettingsPage: React.FC = () => {
                   title="AI Models"
                   subtitle={
                     health.pipeline.running
-                      ? `Loaded by pipeline pid ${health.pipeline.pid}`
+                      ? `Loaded by pipeline pid ${health.pipeline.pid}${
+                          health.pipeline.models?.profile
+                            ? ` · ${health.pipeline.models.profile} profile · Re-ID/face on ${health.pipeline.models.providers}`
+                            : ''
+                        }`
                       : 'On disk — the pipeline is not running'
                   }
                   variant="elevated"

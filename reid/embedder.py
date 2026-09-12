@@ -5,6 +5,8 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
+from config.providers import select_providers
+
 log = logging.getLogger("ibvap.reid")
 
 # torchreid's preprocessing convention for OSNet: RGB, scaled to 0-1, then
@@ -54,9 +56,7 @@ class OSNetEmbedder:
                 "this is a hard failure rather than a degraded mode."
             )
         log.info("Loading OSNet Re-ID model: %s", model_path)
-        self._session = ort.InferenceSession(
-            model_path, providers=["CPUExecutionProvider"]
-        )
+        self._session = ort.InferenceSession(model_path, providers=select_providers())
         self._input_name = self._session.get_inputs()[0].name
 
     def embed(self, frame: np.ndarray, box: tuple) -> "np.ndarray | None":
