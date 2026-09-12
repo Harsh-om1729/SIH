@@ -31,12 +31,47 @@ anything:
    whichever name `DETECTION_MODEL_PATH` expects.
 3. `InsightFace buffalo_s` (face recognition) needs no manual step — it
    downloads itself into `~/.insightface/models/buffalo_s/` the first time
-   `app.py` runs, provided you have internet at least once.
+   `app.py` runs, provided you have internet at least once. **On a machine
+   with neither the cache nor internet, this used to crash the whole
+   pipeline at startup — fixed (see "Offline operation" below): it now
+   degrades to no face recognition / no watchlist matching instead.** For a
+   genuinely offline fresh machine, copy `~/.insightface/models/buffalo_s/`
+   (158 MB, separate from `models/` and from `models.zip`) from a machine
+   that already has it, the same way you got `models/`.
 
 `config/zones_*.json` is also gitignored (each camera's drawn zones are local
 config, not code) — a fresh clone starts with no zones and Phase 18's no-zone
 ceiling applies (see the Phase 18 section below) until you press `z` in the
 video window to draw them.
+
+### Offline operation — what's actually true
+
+Detection, tracking, zones, threat scoring, alerting and the incident
+database need **zero network access**, always — verified live with Wi-Fi
+fully disabled (Phase 14). Two things are the actual exceptions, both
+one-time and both now fail *safely* if you skip them:
+
+- **YOLO and OSNet** are always fully offline — local `.onnx` files, no
+  fetch logic exists for them at all.
+- **InsightFace buffalo_s** (face recognition + watchlist matching)
+  auto-downloads ~158 MB into `~/.insightface/models/buffalo_s/` on first
+  use if that cache doesn't already exist. Confirmed live: with no cache
+  and no network reachable, this used to crash the whole pipeline at
+  startup (an uncaught exception out of `FaceRecognizer.__init__`) —
+  fixed, it now logs a warning and runs with face recognition and
+  watchlist matching disabled, same fallback pattern as
+  `alerts/alert_manager.py`'s existing audio degradation. Detection,
+  tracking, zones, scoring, alerting and the incident DB are all
+  unaffected either way.
+- Outbound webhook/syslog integrations (`WEBHOOK_URL`, `SYSLOG_HOST`) are
+  opt-in and already fail-safe/non-blocking if unreachable (Phase 16) —
+  not needed for the pipeline to run at all.
+
+**For a genuinely offline fresh machine** (no internet, ever): copying
+`models/` isn't enough by itself — also copy
+`~/.insightface/models/buffalo_s/` from a machine that has it, or accept
+that face recognition/watchlist matching will be unavailable on that box
+until you do (everything else still works).
 
 ## Phase status
 
