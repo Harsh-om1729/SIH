@@ -41,17 +41,40 @@ class FaceRecognizer:
         # same output; measured effect is ~97MB less resident memory, and it
         # only saves inference time on frames where a face is actually found
         # (the discarded modules run per detected face, not per call).
-        self._app = FaceAnalysis(
-            name="buffalo_s",
-            providers=select_providers(),
-            allowed_modules=["detection", "recognition"],
-        )
-        self._app.prepare(ctx_id=0, det_size=det_size, det_thresh=det_thresh)
+        #
+        # buffalo_s auto-downloads on first use if ~/.insightface has no
+        # cache yet — fine on a machine with internet, but a hard crash (not
+        # a warning) that takes down the whole pipeline on a fresh, offline
+        # machine, which is exactly the deployment this project targets.
+        # Face recognition/watchlist matching is one feature, not a startup
+        # requirement, so a failure here degrades that feature only — same
+        # pattern as alerts/alert_manager.py's audio fallback.
+        self.available = True
+        try:
+            self._app = FaceAnalysis(
+                name="buffalo_s",
+                providers=select_providers(),
+                allowed_modules=["detection", "recognition"],
+            )
+            self._app.prepare(ctx_id=0, det_size=det_size, det_thresh=det_thresh)
+        except Exception as e:
+            self.available = False
+            self._app = None
+            log.warning(
+                "Face recognition unavailable (%s) — no cached model at "
+                "~/.insightface and no network to fetch it. Running without "
+                "face recognition or watchlist matching; everything else is "
+                "unaffected. Copy ~/.insightface/models/buffalo_s from a "
+                "machine that has it to fix this offline.",
+                e,
+            )
 
     def embed(self, frame, person_box: tuple):
         """Returns (face_box_in_frame_coords, embedding) for the largest
         detected face within person_box's head/shoulder region, or
-        (None, None) if no face found."""
+        (None, None) if no face found (or face recognition is unavailable)."""
+        if not self.available:
+            return None, None
         x1, y1, x2, y2 = person_box
         x1, y1 = max(x1, 0), max(y1, 0)
         height = y2 - y1
