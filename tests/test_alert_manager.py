@@ -5,6 +5,7 @@ Run from ibvap/: python -m unittest tests.test_alert_manager
 """
 
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -228,6 +229,70 @@ class TestAlertManager(unittest.TestCase):
         mgr.forget(1)
         for state in (mgr._last_tier, mgr._last_alert_time, mgr._history, mgr._repeats):
             self.assertNotIn(1, state)
+
+
+class TestIdentityResolutionDoesNotDuplicateAlerts(unittest.TestCase):
+    """The bug this closes: track_key is det.track_id until Re-ID resolves a
+    person_id, then it switches to that person_id. Confirmed live: a person
+    alerted once as "T8", then again as "#2" within the same second, same
+    continuous presence - the key switch silently started a brand-new
+    confirmation/cooldown history for someone already mid-alert."""
+
+    def _manager(self, **kwargs) -> RecordingAlertManager:
+        tmp_dir = tempfile.mkdtemp()
+        return RecordingAlertManager(snapshot_dir=str(Path(tmp_dir) / "snapshots"), **kwargs)
+
+    @staticmethod
+    def _observe(mgr, det, tier, times=1, frames=("f",)):
+        for _ in range(times):
+            mgr.handle(det, make_score(tier), recent_frames=list(frames))
+
+    def test_first_identity_resolution_carries_state_forward(self):
+        mgr = self._manager()
+        det = make_detection(track_id=8, person_id=None)
+        self._observe(mgr, det, "yellow", times=2)  # confirms + fires once as "T8"
+        self.assertEqual(len(mgr.play_calls), 1)
+
+        det.person_id = 2  # Re-ID resolves mid-presence - same physical person
+        # Without the fix this reconfirms yellow from a blank history within
+        # these two calls and fires again as "#2".
+        self._observe(mgr, det, "yellow", times=2)
+        self.assertEqual(
+            len(mgr.play_calls), 1,
+            "same physical person must not re-alert just because their key changed",
+        )
+
+    def test_reacquiring_an_already_known_person_keeps_their_state(self):
+        mgr = self._manager()
+        det_known = make_detection(track_id=1, person_id=2)
+        self._observe(mgr, det_known, "yellow", times=2)
+        self.assertEqual(len(mgr.play_calls), 1)
+
+        # A different, brand-new track starts unresolved...
+        det_new = make_detection(track_id=50, person_id=None)
+        mgr.handle(det_new, make_score("red"), recent_frames=["f"])
+        # ...then immediately resolves to the SAME already-known person - the
+        # temporary track_id=50 state must be dropped, not overwrite #2's.
+        det_new.person_id = 2
+        self._observe(mgr, det_new, "yellow", times=2)
+        self.assertEqual(
+            len(mgr.play_calls), 1,
+            "an established person's cooldown must survive being re-acquired under a new track_id",
+        )
+
+    def test_key_for_track_id_is_purged_with_its_state(self):
+        # state_ttl_seconds is floored at cooldown_seconds, so both must be
+        # tiny for the sleep below to actually cross the eviction threshold.
+        mgr = self._manager(cooldown_seconds=0.01, state_ttl_seconds=0.01)
+        det = make_detection(track_id=8, person_id=None)
+        self._observe(mgr, det, "yellow", times=2)
+        det.person_id = 2
+        mgr.handle(det, make_score("yellow"), recent_frames=["f"])
+        self.assertIn(8, mgr._key_for_track_id)
+
+        time.sleep(0.02)
+        mgr.handle(make_detection(track_id=999, person_id=999), make_score("green"), recent_frames=["f"])
+        self.assertNotIn(8, mgr._key_for_track_id)
 
 
 class TestAlertStateIsBounded(unittest.TestCase):

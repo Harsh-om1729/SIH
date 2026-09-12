@@ -109,6 +109,12 @@ class AlertManager:
         self._repeats: dict = {}
         self._last_seen: dict = {}
         self._last_purge: float = self._now()
+        # Maps a raw ByteTrack track_id to whichever key (track_id, before
+        # Re-ID resolves; person_id, after) its alert state currently lives
+        # under - so handle() can detect the switch and carry that state over
+        # instead of silently starting a stranger's cooldown/confirmation
+        # history at zero the moment identity resolution finishes.
+        self._key_for_track_id: dict = {}
 
         self._yellow_chime = _synth_tone(880, 0.15, volume=0.25) if _AUDIO_AVAILABLE else None
         self._red_siren = _synth_tone(1200, 0.4, volume=0.5) if _AUDIO_AVAILABLE else None
@@ -127,6 +133,7 @@ class AlertManager:
             f"#{det.person_id}" if det.person_id is not None else f"T{det.track_id}"
         )
         now = self._now()
+        self._migrate_on_identity_resolution(det.track_id, track_key)
         self._last_seen[track_key] = now
         self._purge_stale(now)
         prev_tier = self._last_tier.get(track_key, "green")
@@ -193,6 +200,52 @@ class AlertManager:
             return
         self.dispatcher.submit(job_name, fn, *args)
 
+    def _migrate_on_identity_resolution(self, raw_track_id, track_key) -> None:
+        """The bug this closes: track_key is det.track_id until Re-ID
+        resolves a person_id, then it switches to that person_id - a
+        different dict key. Every alert-discipline dict below is keyed by
+        track_key, so that switch used to start a brand-new, empty history
+        for the *same physical person mid-presence*: _last_alert_time.get()
+        defaults to 0, so cooled_down is trivially true, and _last_tier
+        defaults to "green", so the next yellow/red frame reads as a fresh
+        escalation. Confirmed live: a person alerted once as "T8", then
+        again as "#2" a couple of frames later, same continuous presence -
+        Re-ID resolving *sped up* the duplicate rather than causing it,
+        since a new (unresolved) track is checked for identity every frame.
+
+        raw_track_id is the pivot: it doesn't change when person_id
+        resolves, so it is what lets this detect "the key I'd use for this
+        detection just changed" without AlertManager needing to know
+        anything about how identities are assigned.
+        """
+        prior_key = self._key_for_track_id.get(raw_track_id)
+        self._key_for_track_id[raw_track_id] = track_key
+        if prior_key is None or prior_key == track_key or prior_key not in self._last_seen:
+            return
+
+        if track_key in self._last_seen:
+            # Re-ID matched this track back onto a person we already have
+            # standing state for (re-acquisition after occlusion, not a
+            # first resolution) - that established state is more informative
+            # than the few frames just collected under the temporary
+            # track_id, so it stays authoritative and the temporary state is
+            # simply dropped rather than overwriting it.
+            for state in (
+                self._last_tier, self._last_alert_time, self._history,
+                self._repeats, self._last_seen,
+            ):
+                state.pop(prior_key, None)
+        else:
+            # First time this identity has a stable key - carry the
+            # temporary track_id's state forward so confirmation progress
+            # and cooldown timing survive the switch intact.
+            for state in (
+                self._last_tier, self._last_alert_time, self._history,
+                self._repeats, self._last_seen,
+            ):
+                if prior_key in state:
+                    state[track_key] = state.pop(prior_key)
+
     def _purge_stale(self, now: float) -> None:
         """Evicts alert state for identities not seen for `state_ttl_seconds`.
 
@@ -216,6 +269,11 @@ class AlertManager:
             self._last_seen.pop(key, None)
             self._last_tier.pop(key, None)
             self._last_alert_time.pop(key, None)
+        if stale:
+            stale_set = set(stale)
+            gone = [rt for rt, key in self._key_for_track_id.items() if key in stale_set]
+            for rt in gone:
+                self._key_for_track_id.pop(rt, None)
         if stale:
             log.debug("Evicted alert state for %d stale identit(ies)", len(stale))
 
