@@ -76,10 +76,18 @@ class CameraSource:
             ok, frame = cap.read()
             if not ok or frame is None or getattr(frame, "size", 0) == 0:
                 return None
-            if self.is_file:
-                # cap.set(FRAME_WIDTH/HEIGHT) is a no-op for files (only live
-                # cameras honor it), so resize explicitly to avoid processing
-                # native (often very high) file resolution on every stage.
+
+            # Resize on the measured size, not on is_file. cap.set(WIDTH/HEIGHT)
+            # is honored only by local capture devices — it is a silent no-op
+            # for video files AND for network streams, because an RTSP sender
+            # picks its own resolution. Gating on is_file therefore misses
+            # RTSP entirely: a phone pushing 1080p drove every downstream
+            # stage at 6.75x the configured pixel budget (the temporal median
+            # filter alone stacks 5 frames, ~31MB at 1080p). Comparing the
+            # actual size covers all three source types and costs one tuple
+            # compare when the camera already gave us what we asked for.
+            h, w = frame.shape[:2]
+            if (w, h) != (self.width, self.height):
                 frame = cv2.resize(frame, (self.width, self.height))
             return frame
         except Exception as e:

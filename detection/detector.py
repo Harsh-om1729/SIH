@@ -25,6 +25,7 @@ class Detection:
         "zone_direction",
         "watchlist_match",
         "watchlist_similarity",
+        "camera_name",
     )
 
     def __init__(self, class_id: int, class_name: str, confidence: float, box: tuple):
@@ -40,6 +41,10 @@ class Detection:
         self.zone_direction: str | None = None  # "inward" | "outward" | None (yellow only)
         self.watchlist_match: str | None = None  # matched name, if any
         self.watchlist_similarity: float = 0.0
+        # Which camera produced this detection. Set by app.py, which is the
+        # only place that knows; the incident store persists it so an alert
+        # can be traced back to a location. None outside the live pipeline.
+        self.camera_name: str | None = None
 
     def category(self) -> str:
         if self.class_id in PERSON_CLASS_IDS:
@@ -49,16 +54,35 @@ class Detection:
         return "animal"
 
 
+def model_input_size(model_path: str) -> "int | None":
+    """The square input size baked into a fixed-shape ONNX export, or None.
+
+    Ultralytics predicts at 640 unless told otherwise, and a 416/320 export
+    rejects a 640 tensor outright ("Got invalid dimensions for input: images
+    ... Got: 640 Expected: 416"), so callers must pass the real size.
+    """
+    if not model_path.endswith(".onnx"):
+        return None
+    import onnx
+
+    dims = onnx.load(model_path, load_external_data=False).graph.input[0].type.tensor_type.shape.dim
+    return (dims[2].dim_value or None) if len(dims) == 4 else None
+
+
 class Detector:
     """Wraps a YOLOv8 model, filtered down to person/vehicle/animal classes."""
 
     def __init__(self, model_path: str = "models/yolov8n.onnx", confidence: float = 0.4):
         log.info("Loading YOLO model: %s", model_path)
-        self._model = YOLO(model_path)
+        self._model = YOLO(model_path, task="detect")
         self.confidence = confidence
+        size = model_input_size(model_path)
+        self._size_kwargs = {"imgsz": size} if size else {}
 
     def detect(self, frame) -> list[Detection]:
-        results = self._model.predict(frame, conf=self.confidence, verbose=False)[0]
+        results = self._model.predict(
+            frame, conf=self.confidence, verbose=False, **self._size_kwargs
+        )[0]
         detections = []
         for box in results.boxes:
             class_id = int(box.cls[0])

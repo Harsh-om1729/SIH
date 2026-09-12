@@ -80,5 +80,65 @@ class TestZoneEngine(unittest.TestCase):
         self.assertEqual(engine_b.zones[0].zone_type, "red")
 
 
+class TestFixedTierZoneEngine(unittest.TestCase):
+    """A camera assigned one tier for its whole frame (CAMERA_ZONE_TIERS) -
+    no polygons drawn, no config/zones_<camera>.json needed at all."""
+
+    def _engine(self, fixed_tier, **kwargs) -> ZoneEngine:
+        tmp_dir = tempfile.mkdtemp()
+        return ZoneEngine(
+            config_path=str(Path(tmp_dir) / "zones.json"), fixed_tier=fixed_tier, **kwargs
+        )
+
+    def test_every_point_gets_the_fixed_tier_regardless_of_position(self):
+        engine = self._engine("red")
+        self.assertEqual(engine.classify((0, 0))["tier"], "red")
+        self.assertEqual(engine.classify((9999, 9999))["tier"], "red")
+
+    def test_works_with_no_zones_json_on_disk(self):
+        engine = self._engine("yellow")
+        self.assertEqual(engine.zones, [])
+        self.assertEqual(engine.classify((50, 50))["tier"], "yellow")
+
+    def test_direction_inward_when_descending_toward_camera(self):
+        engine = self._engine("red")
+        result = engine.classify((50, 50), direction=(0.0, 10.0))
+        self.assertEqual(result["direction"], "inward")
+
+    def test_direction_outward_when_rising_away_from_camera(self):
+        engine = self._engine("red")
+        result = engine.classify((50, 50), direction=(0.0, -10.0))
+        self.assertEqual(result["direction"], "outward")
+
+    def test_direction_parallel_when_lateral_dominant(self):
+        engine = self._engine("red")
+        result = engine.classify((50, 50), direction=(10.0, 1.0))
+        self.assertEqual(result["direction"], "parallel")
+
+    def test_direction_none_below_minimum_magnitude(self):
+        engine = self._engine("red")
+        result = engine.classify((50, 50), direction=(1.0, 1.0))
+        self.assertIsNone(result["direction"])
+
+    def test_direction_none_when_not_provided(self):
+        engine = self._engine("red")
+        result = engine.classify((50, 50))
+        self.assertIsNone(result["direction"])
+
+    def test_fixed_green_retiers_to_yellow_during_curfew(self):
+        curfew_midnight = datetime(2026, 1, 1, 0, 30)
+        engine = self._engine(
+            "green", curfew_start_hour=23, curfew_end_hour=5, now_fn=lambda: curfew_midnight
+        )
+        self.assertEqual(engine.classify((50, 50))["tier"], "yellow")
+
+    def test_fixed_green_stays_green_outside_curfew(self):
+        midday = datetime(2026, 1, 1, 12, 0)
+        engine = self._engine(
+            "green", curfew_start_hour=23, curfew_end_hour=5, now_fn=lambda: midday
+        )
+        self.assertEqual(engine.classify((50, 50))["tier"], "green")
+
+
 if __name__ == "__main__":
     unittest.main()

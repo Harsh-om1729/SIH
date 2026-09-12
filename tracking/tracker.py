@@ -1,12 +1,22 @@
 import logging
+import os
 import time
 
 from ultralytics import YOLO
 
-from detection.detector import RELEVANT_CLASS_IDS, Detection
+from detection.detector import RELEVANT_CLASS_IDS, Detection, model_input_size
 from tracking.history import TrackHistory
 
 log = logging.getLogger("ibvap.tracking")
+
+# More tolerant of frame-to-frame box drift than Ultralytics' bundled
+# bytetrack.yaml — a corrupted decode on a noisy source (e.g. a phone's RTSP
+# stream over Wi-Fi) can visibly shift/resize a box even when the person
+# hasn't actually moved, which breaks the default's stricter IoU matching
+# and mints unnecessary new track IDs. See tracking/bytetrack_tolerant.yaml.
+DEFAULT_TRACKER_CONFIG = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "bytetrack_tolerant.yaml"
+)
 
 
 class Tracker:
@@ -22,16 +32,20 @@ class Tracker:
 
     def __init__(
         self,
-        model_path: str = "models/yolov8n.onnx",
+        model_path: str = "models/yolov8s.onnx",
         confidence: float = 0.4,
         history_len: int = 10,
+        tracker_config: str = DEFAULT_TRACKER_CONFIG,
         history_ttl_seconds: float = 30.0,
         now_fn=time.time,
     ):
         log.info("Loading YOLO model for tracking: %s", model_path)
-        self._model = YOLO(model_path)
+        self._model = YOLO(model_path, task="detect")
+        size = model_input_size(model_path)
+        self._size_kwargs = {"imgsz": size} if size else {}
         self.confidence = confidence
         self.history_len = history_len
+        self.tracker_config = tracker_config
         self._track_history = TrackHistory(
             history_len=history_len, ttl_seconds=history_ttl_seconds, now_fn=now_fn
         )
@@ -41,8 +55,9 @@ class Tracker:
             frame,
             conf=self.confidence,
             persist=True,
-            tracker="bytetrack.yaml",
+            tracker=self.tracker_config,
             verbose=False,
+            **self._size_kwargs,
         )[0]
 
         detections = []

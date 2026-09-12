@@ -13,5 +13,6 @@ streamlit==1.40.2
 pandas==2.2.3
 fastapi==0.115.6
 uvicorn==0.34.0
+websockets==15.0.1
 requests==2.32.3
 httpx==0.28.1

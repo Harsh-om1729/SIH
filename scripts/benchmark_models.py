@@ -11,6 +11,7 @@ MODELS = {
     "PyTorch (.pt)": "models/yolov8n.pt",
     "ONNX (fp32)": "models/yolov8n.onnx",
     "ONNX (int8)": "models/yolov8n_int8.onnx",
+    "yolov8s ONNX (fp32)": "models/yolov8s.onnx",
 }
 
 WARMUP_RUNS = 5

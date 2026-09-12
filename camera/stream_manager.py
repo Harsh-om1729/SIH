@@ -87,6 +87,14 @@ class CameraStream:
         )
         self._thread.start()
 
+    # A live RTSP stream commonly fails its first few reads while the H.264
+    # decoder is still resolving SPS/PPS and waiting for a clean keyframe —
+    # that is transient noise, not the stream ending. Only give up after
+    # this many *consecutive* failures (~2.5s at the retry sleep below),
+    # which still detects a genuinely dead/disconnected camera quickly.
+    MAX_CONSECUTIVE_FAILURES = 50
+    RETRY_SLEEP_SECONDS = 0.05
+
     def _run(self) -> None:
         try:
             while not self._stop_event.is_set():
@@ -256,14 +264,23 @@ class CameraStream:
         if thread is not None:
             thread.join(timeout=self.stop_timeout)
             if thread.is_alive():
-                # Only reachable if the thread is blocked inside a camera
-                # open/read that OpenCV won't let us interrupt. It is a daemon
-                # thread, so it cannot outlive the process.
+                # Blocked inside an OpenCV open/read we cannot interrupt. Do
+                # NOT release the capture here: the producer may still be
+                # reading the same cv2.VideoCapture, and releasing it out from
+                # under that read is a genuine race — observed on a glitchy
+                # RTSP source as a native mutex abort, which kills the whole
+                # process rather than raising. The thread is a daemon, so the
+                # OS reclaims the handle at exit.
                 log.warning(
                     "[%s] producer thread still running after %.1fs - likely blocked in "
-                    "an OpenCV call; it is a daemon thread and will not outlive the process",
+                    "an OpenCV call; skipping camera release to avoid a "
+                    "use-after-release race. It is a daemon thread and will not "
+                    "outlive the process.",
                     self.name, self.stop_timeout,
                 )
+                self._drain_queue()
+                self._set_health(CameraHealth.OFFLINE, "stopped (capture left open)")
+                return
         self._camera.release()
         self._drain_queue()
         self._set_health(CameraHealth.OFFLINE, "stopped")

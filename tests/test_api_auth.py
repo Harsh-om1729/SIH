@@ -23,7 +23,7 @@ class AuthTestCase(unittest.TestCase):
 
 class TestValidAuthentication(AuthTestCase):
     def test_valid_token_is_accepted(self):
-        with patch.object(api, "API_TOKEN", TOKEN):
+        with patch.object(api, "IBVAP_API_TOKEN", TOKEN):
             response = self.client.get(
                 "/status", headers={"Authorization": f"Bearer {TOKEN}"}
             )
@@ -31,53 +31,60 @@ class TestValidAuthentication(AuthTestCase):
 
     def test_endpoint_behaviour_preserved_for_authenticated_callers(self):
         """Auth must gate the endpoint, not change what it returns."""
-        with patch.object(api, "API_TOKEN", TOKEN):
+        with patch.object(api, "IBVAP_API_TOKEN", TOKEN):
             response = self.client.get(
                 "/status", headers={"Authorization": f"Bearer {TOKEN}"}
             )
-        self.assertEqual(response.json(), {"status": "ok", "service": "IBVAP"})
+        # Exact equality on purpose: /status is the frozen legacy shape that
+        # external C2/SIEM pollers read, so an accidental field change should
+        # fail here. `scope` is a deliberate addition — it records that this
+        # endpoint reports the API process being alive, not camera health.
+        self.assertEqual(
+            response.json(),
+            {"status": "ok", "service": "IBVAP", "scope": "api-process-only"},
+        )
 
 
 class TestMissingAuthentication(AuthTestCase):
     def test_missing_header_is_rejected(self):
-        with patch.object(api, "API_TOKEN", TOKEN):
+        with patch.object(api, "IBVAP_API_TOKEN", TOKEN):
             response = self.client.get("/status")
         self.assertEqual(response.status_code, 401)
 
     def test_missing_header_on_incidents_is_rejected_without_touching_store(self):
-        with patch.object(api, "API_TOKEN", TOKEN):
+        with patch.object(api, "IBVAP_API_TOKEN", TOKEN):
             response = self.client.get("/incidents")
         self.assertEqual(response.status_code, 401)
 
     def test_rejection_advertises_bearer_scheme(self):
-        with patch.object(api, "API_TOKEN", TOKEN):
+        with patch.object(api, "IBVAP_API_TOKEN", TOKEN):
             response = self.client.get("/status")
         self.assertEqual(response.headers.get("WWW-Authenticate"), "Bearer")
 
 
 class TestInvalidAuthentication(AuthTestCase):
     def test_wrong_token_is_rejected(self):
-        with patch.object(api, "API_TOKEN", TOKEN):
+        with patch.object(api, "IBVAP_API_TOKEN", TOKEN):
             response = self.client.get(
                 "/status", headers={"Authorization": "Bearer wrong-token"}
             )
         self.assertEqual(response.status_code, 401)
 
     def test_wrong_scheme_is_rejected(self):
-        with patch.object(api, "API_TOKEN", TOKEN):
+        with patch.object(api, "IBVAP_API_TOKEN", TOKEN):
             response = self.client.get(
                 "/status", headers={"Authorization": f"Basic {TOKEN}"}
             )
         self.assertEqual(response.status_code, 401)
 
     def test_empty_bearer_token_is_rejected(self):
-        with patch.object(api, "API_TOKEN", TOKEN):
+        with patch.object(api, "IBVAP_API_TOKEN", TOKEN):
             response = self.client.get("/status", headers={"Authorization": "Bearer "})
         self.assertEqual(response.status_code, 401)
 
     def test_token_prefix_is_rejected(self):
         """Guards against any accidental prefix/startswith comparison."""
-        with patch.object(api, "API_TOKEN", TOKEN):
+        with patch.object(api, "IBVAP_API_TOKEN", TOKEN):
             response = self.client.get(
                 "/status", headers={"Authorization": f"Bearer {TOKEN[:-1]}"}
             )
@@ -87,7 +94,7 @@ class TestInvalidAuthentication(AuthTestCase):
 class TestNoInformationLeak(AuthTestCase):
     def test_error_body_does_not_echo_credentials_or_the_real_token(self):
         supplied = "supplied-credential-value"
-        with patch.object(api, "API_TOKEN", TOKEN):
+        with patch.object(api, "IBVAP_API_TOKEN", TOKEN):
             response = self.client.get(
                 "/status", headers={"Authorization": f"Bearer {supplied}"}
             )
@@ -98,7 +105,7 @@ class TestNoInformationLeak(AuthTestCase):
 
     def test_missing_and_invalid_are_indistinguishable(self):
         """The caller must not learn *which* part of its credential was wrong."""
-        with patch.object(api, "API_TOKEN", TOKEN):
+        with patch.object(api, "IBVAP_API_TOKEN", TOKEN):
             missing = self.client.get("/status")
             invalid = self.client.get(
                 "/status", headers={"Authorization": "Bearer nope"}
@@ -110,7 +117,7 @@ class TestNoInformationLeak(AuthTestCase):
 class TestFailsClosed(AuthTestCase):
     def test_unconfigured_token_refuses_everyone(self):
         """A misconfigured deployment must not serve the feed unauthenticated."""
-        with patch.object(api, "API_TOKEN", ""):
+        with patch.object(api, "IBVAP_API_TOKEN", ""):
             anonymous = self.client.get("/status")
             with_token = self.client.get(
                 "/status", headers={"Authorization": f"Bearer {TOKEN}"}
@@ -119,7 +126,7 @@ class TestFailsClosed(AuthTestCase):
         self.assertEqual(with_token.status_code, 503)
 
     def test_unconfigured_error_does_not_leak_the_token_value(self):
-        with patch.object(api, "API_TOKEN", ""):
+        with patch.object(api, "IBVAP_API_TOKEN", ""):
             response = self.client.get("/status")
         self.assertNotIn(TOKEN, response.text)
 

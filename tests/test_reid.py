@@ -2,7 +2,7 @@
 Run from ibvap/: python -m unittest tests.test_reid
 
 Uses a fast, deterministic fake embedder (mean crop color) instead of the
-real ResNet-18 model, so these tests exercise PersonGallery's bookkeeping
+real OSNet model, so these tests exercise PersonGallery's bookkeeping
 logic (buffering, matching, TTL eviction) independent of embedding quality.
 """
 
@@ -158,6 +158,64 @@ class TestPersonGalleryReappearance(unittest.TestCase):
 
         for _ in range(5):
             self.assertIsNone(gallery.resolve(601, frame, tiny_box))
+
+
+class TestSimultaneousPeople(unittest.TestCase):
+    """Two people visible in the same frame must never share a person_id, even
+    when their appearance embeddings are close enough to cross the similarity
+    threshold — one person cannot be in two places at once.
+    """
+
+    def test_two_lookalikes_on_screen_together_stay_on_separate_ids(self):
+        clock = {"t": 0.0}
+        gallery = PersonGallery(
+            embed_fn=fake_embed,
+            similarity_threshold=0.8,
+            ttl_seconds=30.0,
+            min_samples=3,
+            now_fn=lambda: clock["t"],
+        )
+
+        # Two people in near-identical clothing — cosine similarity between
+        # these two mean colors is ~0.999, well above the threshold.
+        box_a = (100, 100, 160, 260)
+        box_b = (300, 100, 360, 260)
+        frame = make_frame_with_patch((60, 60, 200), box_a)
+        frame[100:260, 300:360] = (62, 61, 198)
+
+        for _ in range(5):
+            person_a = gallery.resolve(("cam1", 201), frame, box_a)
+            person_b = gallery.resolve(("cam1", 202), frame, box_b)
+            clock["t"] += 0.04  # ~25 FPS: both tracks are live every frame
+
+        self.assertIsNotNone(person_a)
+        self.assertIsNotNone(person_b)
+        self.assertNotEqual(
+            person_a, person_b,
+            "two people visible in the same frame were merged onto one person_id",
+        )
+
+    def test_lookalike_arriving_after_the_other_left_may_reuse_the_id(self):
+        """The exclusion must be scoped to *live* tracks only — a person who
+        left the frame stays matchable, which is the gallery's whole purpose.
+        """
+        clock = {"t": 0.0}
+        gallery = PersonGallery(
+            embed_fn=fake_embed,
+            similarity_threshold=0.8,
+            ttl_seconds=30.0,
+            min_samples=3,
+            now_fn=lambda: clock["t"],
+        )
+
+        box = (100, 100, 160, 260)
+        frame = make_frame_with_patch((60, 60, 200), box)
+
+        first = resolve_until_decided(gallery, ("cam1", 301), frame, box)
+        clock["t"] = 5.0  # track 301 is long gone from the live window
+        second = resolve_until_decided(gallery, ("cam1", 302), frame, box)
+
+        self.assertEqual(first, second)
 
 
 class TestCrossCameraReID(unittest.TestCase):

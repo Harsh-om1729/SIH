@@ -12,3 +12,20 @@ database/evidence.key
 database/transfer.key
 database/watchlist.key
 transfer_bundle.enc
+database/watchlist.key
+
+# Runtime state written by the dashboard, not configuration to be shared:
+# cameras added through the UI, and the pre-merge .env backup.
+config/cameras.json
+config/dashboard_settings.json
+.env.bak-*
+
+# Pipeline -> dashboard live frames and health (integration/runtime_state.py)
+runtime/
+
+# Model weight bundle for sharing with teammates (see README "Model weights"
+# section) - regenerate with `zip -r models.zip models/`, don't commit it.
+models.zip
+
+# scripts/accuracy_eval.py output - real photos of whoever ran the capture.
+eval_runs/

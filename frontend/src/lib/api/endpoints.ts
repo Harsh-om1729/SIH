@@ -1,0 +1,232 @@
+import { safeFetch, ApiResponse } from './client';
+import type { Incident } from '@/lib/mockIncidents';
+import type { Zone } from '@/lib/mockZones';
+import type { WatchlistPerson } from '@/lib/mockWatchlist';
+import {
+  ThresholdSettings,
+  IntegrationSettings,
+  loadThresholdSettings,
+  loadIntegrationSettings,
+} from '@/lib/settingsState';
+
+// Mutations deliberately pass NO fallback to safeFetch. They used to pass
+// `{ success: true }` (or the submitted object), which safeFetch returns on
+// failure — so a delete or save against a dead backend resolved as a success
+// and the UI said "done". Now a failed mutation has data === null and
+// isFallback === true, and callers report the failure.
+
+export type CameraSource = 'pipeline' | 'direct' | 'idle';
+
+export interface ApiCamera {
+  id: string;
+  name: string;
+  location: string;
+  sector: string;
+  streamUrl?: string;
+  fps: string;
+  activity: string;
+  isActive: boolean;
+  resolution?: string;
+  // Real status from /api/v1/cameras (see integration/api.py _camera_status).
+  source?: CameraSource;
+  health?: string;
+  activityGate?: 'HIGH' | 'LOW' | null;
+  lowLightBoost?: boolean | null;
+  brightness?: number | null;
+  detections?: number | null;
+  maxTier?: 'green' | 'yellow' | 'red' | null;
+  lastFrameAt?: number | null;
+  zones?: number;
+}
+
+// 1. Cameras
+export const camerasApi = {
+  async getCameras(fallback: ApiCamera[]): Promise<ApiResponse<ApiCamera[]>> {
+    return safeFetch<ApiCamera[]>('/cameras', { method: 'GET' }, fallback);
+  },
+
+  async addCamera(camera: ApiCamera): Promise<ApiResponse<ApiCamera>> {
+    return safeFetch<ApiCamera>('/cameras', { method: 'POST', body: JSON.stringify(camera) });
+  },
+
+  async deleteCamera(id: string): Promise<ApiResponse<{ success: boolean; id: string }>> {
+    return safeFetch<{ success: boolean; id: string }>(`/cameras/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+    });
+  },
+
+  async stopCamera(id: string): Promise<ApiResponse<{ success: boolean; id: string }>> {
+    return safeFetch<{ success: boolean; id: string }>(`/cameras/${encodeURIComponent(id)}/stop`, {
+      method: 'POST',
+    });
+  },
+};
+
+// 2. Incidents — no mock fallback. An unreachable backend yields an empty
+// list plus isFallback, and pages show an offline state instead of sample
+// rows that look exactly like real detections.
+export const incidentsApi = {
+  async getIncidents(fallback: Incident[] = [], limit = 500): Promise<ApiResponse<Incident[]>> {
+    return safeFetch<Incident[]>(`/incidents?limit=${limit}`, { method: 'GET' }, fallback);
+  },
+
+  async getIncident(id: number, fallback?: Incident): Promise<ApiResponse<Incident>> {
+    return safeFetch<Incident>(`/incidents/${id}`, { method: 'GET' }, fallback);
+  },
+
+  async acknowledgeIncident(id: number): Promise<ApiResponse<{ success: boolean; id: number }>> {
+    return safeFetch<{ success: boolean; id: number }>(`/incidents/${id}/acknowledge`, {
+      method: 'POST',
+    });
+  },
+
+  async resolveIncident(id: number, reason: string): Promise<ApiResponse<Incident>> {
+    return safeFetch<Incident>(`/incidents/${id}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ reason }),
+    });
+  },
+};
+
+// 3. Zones
+export const zonesApi = {
+  async getZones(fallback: Record<string, Zone[]>): Promise<ApiResponse<Record<string, Zone[]>>> {
+    return safeFetch<Record<string, Zone[]>>('/zones', { method: 'GET' }, fallback);
+  },
+
+  async saveZones(zones: Record<string, Zone[]>): Promise<ApiResponse<Record<string, Zone[]>>> {
+    return safeFetch<Record<string, Zone[]>>('/zones', { method: 'PUT', body: JSON.stringify(zones) });
+  },
+};
+
+// 4. Watchlist
+export const watchlistApi = {
+  async getWatchlist(fallback: WatchlistPerson[] = []): Promise<ApiResponse<WatchlistPerson[]>> {
+    return safeFetch<WatchlistPerson[]>('/watchlist', { method: 'GET' }, fallback);
+  },
+
+  async enrollPerson(person: WatchlistPerson): Promise<ApiResponse<WatchlistPerson>> {
+    return safeFetch<WatchlistPerson>('/watchlist', { method: 'POST', body: JSON.stringify(person) });
+  },
+
+  async deletePerson(id: number): Promise<ApiResponse<{ success: boolean; id: number }>> {
+    return safeFetch<{ success: boolean; id: number }>(`/watchlist/${id}`, { method: 'DELETE' });
+  },
+};
+
+// 5. Settings — the GET keeps the locally saved values as its offline seed;
+// SettingsPage labels them as such.
+export const settingsApi = {
+  async getSettings(): Promise<
+    ApiResponse<{ thresholds: ThresholdSettings; integrations: IntegrationSettings }>
+  > {
+    const fallback = {
+      thresholds: loadThresholdSettings(),
+      integrations: loadIntegrationSettings(),
+    };
+    return safeFetch<{ thresholds: ThresholdSettings; integrations: IntegrationSettings }>(
+      '/settings',
+      { method: 'GET' },
+      fallback
+    );
+  },
+
+  async updateThresholds(thresholds: ThresholdSettings): Promise<ApiResponse<ThresholdSettings>> {
+    return safeFetch<ThresholdSettings>('/settings/thresholds', {
+      method: 'PUT',
+      body: JSON.stringify(thresholds),
+    });
+  },
+
+  async updateIntegrations(
+    integrations: IntegrationSettings
+  ): Promise<ApiResponse<IntegrationSettings>> {
+    return safeFetch<IntegrationSettings>('/settings/integrations', {
+      method: 'PUT',
+      body: JSON.stringify(integrations),
+    });
+  },
+};
+
+// 6. System health, metadata and integration diagnostics.
+export interface PipelineCamera {
+  health?: string;
+  fps?: number;
+  active?: boolean;
+  motion?: number;
+  zones?: number;
+  lastFrameAt?: number;
+  detections?: number;
+  persons?: number;
+  vehicles?: number;
+  maxTier?: 'green' | 'yellow' | 'red' | null;
+  lowLightBoost?: boolean;
+  brightness?: number;
+}
+
+export interface SystemHealth {
+  status: 'ok' | 'degraded' | 'pipeline-stopped';
+  checkedAt: number;
+  api: { status: string; startedAt: number; uptimeSeconds: number; websocketClients: number };
+  pipeline: {
+    running: boolean;
+    detail: string | null;
+    pid?: number;
+    startedAt?: number;
+    updatedAt?: number;
+    ageSeconds?: number;
+    cameras?: Record<string, PipelineCamera>;
+    models?: Record<string, string>;
+    rssMb?: number;
+  };
+  database: {
+    ok: boolean;
+    total?: number;
+    open?: number;
+    acknowledged?: number;
+    resolved?: number;
+    openRed?: number;
+    lastIncidentAt?: number | null;
+    error?: string;
+  };
+  evidence: { dir: string; files: number; sizeMb: number };
+  disk: { freeGb: number; totalGb: number; percentUsed: number };
+  host: {
+    cpuPercent: number;
+    cpuCount: number;
+    memoryPercent: number;
+    memoryUsedGb: number;
+    memoryTotalGb: number;
+    apiRssMb: number;
+    gpuPercent: number | null;
+  } | null;
+  models: Record<string, { path: string; present: boolean; sizeMb: number | null }>;
+  zones: Record<string, number>;
+  watchlist: { enrolled: number | null };
+}
+
+export interface ApiMeta {
+  resolutionReasons: string[];
+  tierThresholds: { yellow: number; red: number };
+  cameraResolution: string;
+  livePublishFps: number;
+}
+
+export interface IntegrationTestResult {
+  webhook?: { ok: boolean; status?: number; latencyMs?: number; url?: string; detail?: string };
+  syslog?: { ok: boolean; detail?: string };
+}
+
+export const systemApi = {
+  async getHealth(): Promise<ApiResponse<SystemHealth>> {
+    return safeFetch<SystemHealth>('/system/health', { method: 'GET' });
+  },
+
+  async getMeta(): Promise<ApiResponse<ApiMeta>> {
+    return safeFetch<ApiMeta>('/meta', { method: 'GET' });
+  },
+
+  async testIntegrations(): Promise<ApiResponse<IntegrationTestResult>> {
+    return safeFetch<IntegrationTestResult>('/integrations/test', { method: 'POST' });
+  },
+};
