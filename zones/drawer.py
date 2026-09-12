@@ -89,10 +89,22 @@ class ZoneDrawer:
     def draw_overlay(self, frame) -> None:
         h, w = frame.shape[:2]
 
-        for zone in self.engine.zones:
-            color = ZONE_COLORS[zone.zone_type]
-            pts = np.array(zone.polygon, dtype=np.int32)
-            cv2.polylines(frame, [pts], True, color, 2)
+        if self.engine.fixed_tier is not None:
+            # This camera is pinned to one tier via CAMERA_ZONE_TIERS - any
+            # polygons still sitting in its zones.json are leftovers from
+            # before that switch and are no longer used for scoring at all
+            # (see ZoneEngine.classify). Drawing them would show boundaries
+            # that don't mean anything anymore, so a label replaces the lines.
+            color = ZONE_COLORS[self.engine.fixed_tier]
+            cv2.putText(
+                frame, f"FIXED TIER: {self.engine.fixed_tier.upper()}", (10, 24),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2,
+            )
+        else:
+            for zone in self.engine.zones:
+                color = ZONE_COLORS[zone.zone_type]
+                pts = np.array(zone.polygon, dtype=np.int32)
+                cv2.polylines(frame, [pts], True, color, 2)
 
         # A saved border line stays visible so the operator can see the geometry
         # the kinematic score is measuring against.
