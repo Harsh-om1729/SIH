@@ -316,5 +316,47 @@ class TestSystemHealthAndCameras(ApiCase):
         self.assertIn(b"\xff\xd8", chunk)
 
 
+class TestCorsOrigins(ApiCase):
+    """The bug this closes: Vite falls back to 5174/5175/... the moment 5173
+    is taken (observed live - "Port 5173 is in use, trying another one"),
+    but IBVAP_CORS_ORIGINS was a fixed list containing only 5173, so every
+    dashboard API call failed CORS in the browser the moment that happened.
+    Any port on localhost/127.0.0.1 must work regardless of IBVAP_ALLOW_LAN;
+    it is still the same machine, and the bearer token is still required."""
+
+    def _preflight_origin(self, origin: str) -> "str | None":
+        resp = self.client.options(
+            "/api/v1/system/health",
+            headers={"Origin": origin, "Access-Control-Request-Method": "GET"},
+        )
+        return resp.headers.get("access-control-allow-origin")
+
+    def test_configured_origin_is_allowed(self):
+        self.assertEqual(self._preflight_origin("http://localhost:5173"), "http://localhost:5173")
+
+    def test_a_different_localhost_port_is_still_allowed(self):
+        # The exact scenario that broke: Vite moved off 5173.
+        self.assertEqual(self._preflight_origin("http://localhost:5176"), "http://localhost:5176")
+
+    def test_a_different_127_0_0_1_port_is_still_allowed(self):
+        self.assertEqual(self._preflight_origin("http://127.0.0.1:5180"), "http://127.0.0.1:5180")
+
+    def test_an_arbitrary_public_origin_is_rejected(self):
+        self.assertIsNone(self._preflight_origin("http://evil.example.com"))
+
+    def test_lan_origin_regex_matches_private_ranges_only(self):
+        # Exercises the building block IBVAP_ALLOW_LAN=1 wires in, independent
+        # of whatever that flag happens to be at import time in this run.
+        import re
+
+        pattern = re.compile(rf"^https?://({api_module._LAN_ORIGIN_RE})(:\d+)?$")
+        for origin in (
+            "http://192.168.1.59:5173", "http://10.0.0.5:8080", "http://172.20.3.4",
+        ):
+            self.assertIsNotNone(pattern.match(origin), origin)
+        for origin in ("http://8.8.8.8:5173", "http://172.32.0.1", "http://evil.example.com"):
+            self.assertIsNone(pattern.match(origin), origin)
+
+
 if __name__ == "__main__":
     unittest.main()

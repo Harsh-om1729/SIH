@@ -107,23 +107,30 @@ app = FastAPI(title="IBVAP Integration API")
 # though curl works. Origins are an explicit allowlist, never "*": these
 # routes carry a bearer token, and "*" plus credentials is exactly the
 # combination that lets any page a viewer opens read this feed.
+# Any port on localhost/127.0.0.1 is always allowed, regardless of
+# IBVAP_ALLOW_LAN: Vite falls back to 5174/5175/... the moment 5173 is
+# taken (confirmed live - "Port 5173 is in use, trying another one"), and
+# IBVAP_CORS_ORIGINS below is a fixed list that doesn't track that. This
+# isn't a security relaxation: it's still the same machine, and every route
+# still requires the bearer token regardless of origin.
+#
 # With IBVAP_ALLOW_LAN=1, also accept private-range origins so the dashboard
 # opens on a phone or a second laptop. Deliberately a regex over RFC1918
 # addresses rather than "*": a public origin still cannot call this API, and
 # the bearer token is required regardless of where the page was served from.
+_LOCALHOST_ORIGIN_RE = r"localhost|127\.0\.0\.1|\[::1\]"
 _LAN_ORIGIN_RE = (
-    r"^https?://("
-    r"localhost|127\.0\.0\.1|\[::1\]|"
     r"10\.\d{1,3}\.\d{1,3}\.\d{1,3}|"
     r"192\.168\.\d{1,3}\.\d{1,3}|"
     r"172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}"
-    r")(:\d+)?$"
 )
+_allowed_hosts = _LOCALHOST_ORIGIN_RE + (f"|{_LAN_ORIGIN_RE}" if IBVAP_ALLOW_LAN else "")
+_CORS_ORIGIN_REGEX = rf"^https?://({_allowed_hosts})(:\d+)?$"
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=IBVAP_CORS_ORIGINS,
-    allow_origin_regex=_LAN_ORIGIN_RE if IBVAP_ALLOW_LAN else None,
+    allow_origin_regex=_CORS_ORIGIN_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
